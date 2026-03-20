@@ -175,7 +175,6 @@
             const [form, setForm] = useState({ name: '', hours: 8, rate: 500, color: '#3b82f6' });
             
             const fileInputRef = useRef(null);
-            const isTelegram = window.Telegram && window.Telegram.WebApp;
 
             const resetForm = () => { setForm({ name: '', hours: 8, rate: 500, color: '#3b82f6' }); setEditingId(null); };
             const handleEdit = (tpl) => { 
@@ -211,51 +210,18 @@
                 if (editingId === id) resetForm();
             };
 
-            // --- ОБНОВЛЕННАЯ ЛОГИКА ЭКСПОРТА ---
+            // --- Логика Экспорта (Файл) ---
             const handleExport = () => {
                 const dataStr = JSON.stringify(settings, null, 2);
-                
-                // Если запущено в Telegram
-                if (isTelegram) {
-                    navigator.clipboard.writeText(dataStr).then(() => {
-                        window.Telegram.WebApp.showAlert("Данные скопированы в буфер обмена!\n\nВставьте их в 'Избранное' или заметки, чтобы сохранить.");
-                    }).catch(err => {
-                        window.Telegram.WebApp.showAlert("Не удалось скопировать данные.");
-                    });
-                } else {
-                    // Обычный браузер - скачиваем файл
-                    const blob = new Blob([dataStr], { type: "application/json" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `shift_backup_${new Date().toISOString().slice(0,10)}.json`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                }
-            };
-
-            // --- НОВАЯ ЛОГИКА ИМПОРТА ИЗ БУФЕРА (для Telegram) ---
-            const handleImportFromClipboard = () => {
-                navigator.clipboard.readText().then(text => {
-                    try {
-                        const importedData = JSON.parse(text);
-                        if (importedData.shifts && importedData.templates) {
-                             if (window.confirm("Загрузить данные из буфера обмена? Текущие данные будут заменены.")) {
-                                setSettings(importedData);
-                                if(isTelegram) window.Telegram.WebApp.showAlert("Данные успешно загружены!");
-                                else alert("Данные успешно загружены!");
-                            }
-                        } else {
-                            alert("В буфере обмена неверные данные.");
-                        }
-                    } catch (err) {
-                        alert("Ошибка чтения данных из буфера.");
-                    }
-                }).catch(err => {
-                    alert("Не удалось прочитать буфер обмена. Попробуйте загрузить файл.");
-                });
+                const blob = new Blob([dataStr], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `shift_backup_${new Date().toISOString().slice(0,10)}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
             };
 
             const handleImportClick = () => fileInputRef.current.click();
@@ -304,27 +270,16 @@
                         <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm">
                             <h3 className="font-bold text-gray-800 dark:text-white mb-2">Резервное копирование</h3>
                             
-                            {/* Экспорт */}
                             <button onClick={handleExport}
                                 className="w-full p-3 rounded-xl font-medium text-white bg-green-500 hover:bg-green-600 transition text-sm mb-2">
-                                {isTelegram ? "📋 Скопировать данные (в буфер)" : "📥 Сохранить в файл"}
+                                📥 Сохранить в файл
                             </button>
 
-                            {/* Импорт */}
-                            {isTelegram && (
-                                <button onClick={handleImportFromClipboard}
-                                    className="w-full p-3 rounded-xl font-medium text-purple-600 bg-purple-100 dark:bg-purple-900/50 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900 transition text-sm mb-2">
-                                    📋 Вставить из буфера обмена
-                                </button>
-                            )}
-                            
                             <button onClick={handleImportClick}
                                 className="w-full p-3 rounded-xl font-medium text-blue-600 bg-blue-100 dark:bg-blue-900/50 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900 transition text-sm">
                                 📤 Загрузить из файла
                             </button>
                             <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".json" className="hidden" />
-                            
-                            {isTelegram && <p className="text-[10px] text-gray-400 mt-2 text-center">В Telegram удобно сохранять данные, отправив их самому себе в "Избранное".</p>}
                         </div>
 
                         {/* Налоги */}
@@ -454,7 +409,7 @@
                     tg.ready();
                     tg.expand();
                 }
-                const savedData = localStorage.getItem('workShiftsAppDataV11'); // Версия 11
+                const savedData = localStorage.getItem('workShiftsAppDataV12'); // Версия 12
                 if (savedData) {
                     try {
                         const parsed = JSON.parse(savedData);
@@ -468,7 +423,7 @@
 
             // Save
             useEffect(() => {
-                if (initialized) localStorage.setItem('workShiftsAppDataV11', JSON.stringify(settings));
+                if (initialized) localStorage.setItem('workShiftsAppDataV12', JSON.stringify(settings));
             }, [settings, initialized]);
 
             // Theme
