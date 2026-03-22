@@ -228,6 +228,11 @@
 
                     <div className="p-4 flex-1 overflow-y-auto scrollbar-hide space-y-6">
                         
+                        {/* Инфо о синхронизации */}
+                        <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-2xl text-center text-sm text-blue-700 dark:text-blue-300 border border-blue-100 dark:border-blue-800">
+                            ☁️ Данные синхронизируются с облаком Telegram автоматически.
+                        </div>
+
                         {/* Налоги */}
                         <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm">
                             <h3 className="font-bold text-gray-800 dark:text-white mb-2">Налоги</h3>
@@ -348,8 +353,32 @@
             const [isSelectionMode, setIsSelectionMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
             
-            // Ключ для хранения данных
-            const STORAGE_KEY = 'workShiftsAppDataV13';
+            const STORAGE_KEY = 'workShiftsAppDataV14';
+
+            // Функция парсинга данных
+            const parseData = (dataStr) => {
+                try {
+                    const parsed = JSON.parse(dataStr);
+                    if (parsed.templates) parsed.templates = parsed.templates.map(t => ({ ...t, hours: Number(t.hours) || 0, rate: Number(t.rate) || 0 }));
+                    if (!parsed.bonuses) parsed.bonuses = {};
+                    return parsed;
+                } catch (e) { return null; }
+            };
+
+            // Функция загрузки данных из облака
+            const fetchDataFromCloud = () => {
+                const tg = window.Telegram?.WebApp;
+                if (tg?.CloudStorage) {
+                    tg.CloudStorage.getItem(STORAGE_KEY, (err, value) => {
+                        if (!err && value) {
+                            const parsed = parseData(value);
+                            if (parsed) {
+                                setSettings(prev => ({ ...prev, ...parsed }));
+                            }
+                        }
+                    });
+                }
+            };
 
             // Init
             useEffect(() => {
@@ -359,40 +388,41 @@
                     tg.expand();
                 }
 
-                // Функция загрузки данных
-                const loadData = (dataStr) => {
-                    try {
-                        const parsed = JSON.parse(dataStr);
-                        if (parsed.templates) parsed.templates = parsed.templates.map(t => ({ ...t, hours: Number(t.hours) || 0, rate: Number(t.rate) || 0 }));
-                        if (!parsed.bonuses) parsed.bonuses = {};
-                        setSettings(prev => ({ ...prev, ...parsed }));
-                    } catch (e) { console.error("Parse error", e); }
-                    setInitialized(true);
-                };
-
-                // Пытаемся загрузить из Telegram Cloud
+                // Первичная загрузка
                 if (tg?.CloudStorage) {
                     tg.CloudStorage.getItem(STORAGE_KEY, (err, value) => {
                         if (!err && value) {
-                            loadData(value);
-                        } else {
-                            // Если в облаке пусто, пробуем локально (для первого запуска)
-                            const local = localStorage.getItem(STORAGE_KEY);
-                            if (local) {
-                                loadData(local);
-                                // Сразу сохраняем в облако, чтобы на другом устройстве подтянулось
-                                tg.CloudStorage.setItem(STORAGE_KEY, local);
-                            } else {
-                                setInitialized(true);
+                            const parsed = parseData(value);
+                            if (parsed) {
+                                setSettings(prev => ({ ...prev, ...parsed }));
                             }
                         }
+                        setInitialized(true);
                     });
                 } else {
-                    // Fallback для браузера
-                    const savedData = localStorage.getItem(STORAGE_KEY);
-                    if (savedData) loadData(savedData);
-                    else setInitialized(true);
+                    const local = localStorage.getItem(STORAGE_KEY);
+                    if (local) {
+                        const parsed = parseData(local);
+                        if (parsed) setSettings(prev => ({ ...prev, ...parsed }));
+                    }
+                    setInitialized(true);
                 }
+
+                // Синхронизация при возврате в приложение (когда пользователь открывает мини-апп заново)
+                const handleVisibilityChange = () => {
+                    if (document.visibilityState === 'visible') {
+                        fetchDataFromCloud();
+                    }
+                };
+                document.addEventListener('visibilitychange', handleVisibilityChange);
+
+                // Поллинг (проверка каждые 15 секунд для открытого приложения)
+                const interval = setInterval(fetchDataFromCloud, 15000);
+
+                return () => {
+                    document.removeEventListener('visibilitychange', handleVisibilityChange);
+                    clearInterval(interval);
+                };
             }, []);
 
             // Save
@@ -401,12 +431,12 @@
                 
                 const dataStr = JSON.stringify(settings);
                 
-                // Сохраняем в Telegram Cloud
+                // Сохранение в облако
                 if (window.Telegram?.WebApp?.CloudStorage) {
                     window.Telegram.WebApp.CloudStorage.setItem(STORAGE_KEY, dataStr);
                 }
                 
-                // И всегда сохраняем локально (как кэш)
+                // Локально
                 localStorage.setItem(STORAGE_KEY, dataStr);
                 
             }, [settings, initialized]);
