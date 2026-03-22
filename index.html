@@ -25,7 +25,7 @@
             padding: 0;
             height: 100vh;
             overflow-x: hidden;
-            transition: background-color 0.3s, color 0.3s;
+            transition: background-color 0.3s, color  0.3s;
         }
         body { background-color: #f3f4f6; color: #111827; }
         body.dark { background-color: #111827; color: #f9fafb; }
@@ -36,6 +36,12 @@
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
         
         .day-selected { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5); }
+        
+        /* Стили для индикатора синхронизации */
+        .sync-status { font-size: 10px; padding: 2px 6px; border-radius: 4px; margin-left: 8px; }
+        .sync-ok { background: #d1fae5; color: #065f46; }
+        .sync-fail { background: #fee2e2; color: #991b1b; }
+        .sync-pending { background: #fef3c7; color: #92400e; }
     </style>
 </head>
 <body>
@@ -170,7 +176,7 @@
         };
 
         // --- Компонент: Настройки ---
-        const SettingsScreen = ({ settings, setSettings, onClose }) => {
+        const SettingsScreen = ({ settings, setSettings, onClose, onClear }) => {
             const [editingId, setEditingId] = useState(null);
             const [form, setForm] = useState({ name: '', hours: 8, rate: 500, color: '#3b82f6' });
 
@@ -208,17 +214,6 @@
                 if (editingId === id) resetForm();
             };
 
-            const handleClearData = () => {
-                if (window.confirm("Вы уверены, что хотите удалить все смены и выплаты?\nНастройки и шаблоны сохранятся.")) {
-                    setSettings(prev => ({
-                        ...prev,
-                        shifts: {},
-                        payments: {},
-                        bonuses: {}
-                    }));
-                }
-            };
-
             return (
                 <div className="fixed inset-0 bg-gray-100 dark:bg-gray-900 z-50 flex flex-col">
                     <div className="p-4 border-b dark:border-gray-700 flex justify-between items-center bg-white dark:bg-gray-800 shadow-sm">
@@ -230,7 +225,8 @@
                         
                         {/* Инфо о синхронизации */}
                         <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-2xl text-center text-sm text-blue-700 dark:text-blue-300 border border-blue-100 dark:border-blue-800">
-                            ☁️ Данные синхронизируются с облаком Telegram автоматически.
+                            ☁️ Данные хранятся в облаке Telegram частями.<br/>
+                            <span className="text-xs opacity-75">Если данные не видны на другом телефоне, нажмите кнопку "Синхронизировать" в главном меню.</span>
                         </div>
 
                         {/* Налоги */}
@@ -317,11 +313,11 @@
                         {/* Опасная зона */}
                         <div className="bg-red-50 dark:bg-red-900/10 p-4 rounded-2xl border border-red-200 dark:border-red-800">
                             <h3 className="font-bold text-red-700 dark:text-red-300 mb-2">Опасная зона</h3>
-                            <button onClick={handleClearData}
+                            <button onClick={onClear}
                                 className="w-full p-3 rounded-xl font-bold text-white bg-red-500 hover:bg-red-600 transition">
                                 Очистить календарь
                             </button>
-                            <p className="text-xs text-red-400 mt-2">Удалит все смены, премии и выплаты. Шаблоны останутся.</p>
+                            <p className="text-xs text-red-400 mt-2">Удалит все смены, премии и выплаты из облака.</p>
                         </div>
 
                     </div>
@@ -344,6 +340,9 @@
                 theme: 'light',
                 tax: 13
             });
+            
+            const [syncStatus, setSyncStatus] = useState('pending'); // pending, ok, fail
+            const [lastSyncTime, setLastSyncTime] = useState(null);
 
             const [selectedDate, setSelectedDate] = useState(null);
             const [showModal, setShowModal] = useState(false);
@@ -353,92 +352,140 @@
             const [isSelectionMode, setIsSelectionMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
             
-            const STORAGE_KEY = 'workShiftsAppDataV14';
-
-            // Функция парсинга данных
-            const parseData = (dataStr) => {
-                try {
-                    const parsed = JSON.parse(dataStr);
-                    if (parsed.templates) parsed.templates = parsed.templates.map(t => ({ ...t, hours: Number(t.hours) || 0, rate: Number(t.rate) || 0 }));
-                    if (!parsed.bonuses) parsed.bonuses = {};
-                    return parsed;
-                } catch (e) { return null; }
+            // Раздельные ключи для обхода лимита размера
+            const KEYS = {
+                CONFIG: 'shifts_config_v15', // templates, tax, theme, startDay
+                SHIFTS: 'shifts_data_v15',  // shifts object
+                MONEY: 'shifts_money_v15'   // payments & bonuses
             };
 
-            // Функция загрузки данных из облака
-            const fetchDataFromCloud = () => {
-                const tg = window.Telegram?.WebApp;
-                if (tg?.CloudStorage) {
-                    tg.CloudStorage.getItem(STORAGE_KEY, (err, value) => {
-                        if (!err && value) {
-                            const parsed = parseData(value);
-                            if (parsed) {
-                                setSettings(prev => ({ ...prev, ...parsed }));
-                            }
+            const tg = window.Telegram?.WebApp;
+
+            // --- Функции работы с облаком ---
+
+            const parseJson = (str) => {
+                try { return str ? JSON.parse(str) : null; } catch (e) { return null; }
+            };
+
+            // Загрузка данных
+            const loadCloudData = () => {
+                if (!tg?.CloudStorage) return;
+                
+                setSyncStatus('pending');
+                
+                const keysToLoad = [KEYS.CONFIG, KEYS.SHIFTS, KEYS.MONEY];
+                
+                tg.CloudStorage.getItems(keysToLoad, (error, result) => {
+                    if (error) {
+                        console.error("Load error", error);
+                        setSyncStatus('fail');
+                        return;
+                    }
+
+                    // Парсим конфиг
+                    const config = parseJson(result[KEYS.CONFIG]);
+                    // Парсим смены
+                    const shifts = parseJson(result[KEYS.SHIFTS]);
+                    // Парсим деньги
+                    const money = parseJson(result[KEYS.MONEY]);
+
+                    setSettings(prev => {
+                        const newState = { ...prev };
+                        
+                        // Мержим данные осторожно
+                        if (config) {
+                            newState.templates = config.templates || prev.templates;
+                            newState.tax = config.tax || prev.tax;
+                            newState.theme = config.theme || prev.theme;
+                            newState.startDay = config.startDay || prev.startDay;
                         }
+                        if (shifts) newState.shifts = shifts;
+                        if (money) {
+                            if (money.payments) newState.payments = money.payments;
+                            if (money.bonuses) newState.bonuses = money.bonuses;
+                        }
+                        return newState;
                     });
-                }
+
+                    setSyncStatus('ok');
+                    setLastSyncTime(new Date());
+                    setInitialized(true);
+                });
+            };
+
+            // Сохранение данных (частями)
+            const saveCloudData = (newSettings) => {
+                if (!tg?.CloudStorage) return;
+
+                setSyncStatus('pending');
+
+                // 1. Сохраняем конфиг (маленький)
+                const configData = JSON.stringify({
+                    templates: newSettings.templates,
+                    tax: newSettings.tax,
+                    theme: newSettings.theme,
+                    startDay: newSettings.startDay
+                }));
+
+                // 2. Сохраняем смены (может быть большим)
+                const shiftsData = JSON.stringify(newSettings.shifts);
+
+                // 3. Сохраняем деньги (может быть большим)
+                const moneyData = JSON.stringify({
+                    payments: newSettings.payments,
+                    bonuses: newSettings.bonuses
+                });
+
+                // Сохраняем по очереди
+                let savedCount = 0;
+                const checkDone = (err) => {
+                    if (err) {
+                        console.error("Save error", err);
+                        setSyncStatus('fail');
+                    } else {
+                        savedCount++;
+                        if (savedCount === 3) {
+                            setSyncStatus('ok');
+                            setLastSyncTime(new Date());
+                        }
+                    }
+                };
+
+                tg.CloudStorage.setItem(KEYS.CONFIG, configData, checkDone);
+                tg.CloudStorage.setItem(KEYS.SHIFTS, shiftsData, checkDone);
+                tg.CloudStorage.setItem(KEYS.MONEY, moneyData, checkDone);
             };
 
             // Init
             useEffect(() => {
-                const tg = window.Telegram?.WebApp;
                 if (tg) {
                     tg.ready();
                     tg.expand();
                 }
 
-                // Первичная загрузка
-                if (tg?.CloudStorage) {
-                    tg.CloudStorage.getItem(STORAGE_KEY, (err, value) => {
-                        if (!err && value) {
-                            const parsed = parseData(value);
-                            if (parsed) {
-                                setSettings(prev => ({ ...prev, ...parsed }));
-                            }
-                        }
-                        setInitialized(true);
-                    });
-                } else {
-                    const local = localStorage.getItem(STORAGE_KEY);
-                    if (local) {
-                        const parsed = parseData(local);
-                        if (parsed) setSettings(prev => ({ ...prev, ...parsed }));
-                    }
-                    setInitialized(true);
-                }
+                loadCloudData();
 
-                // Синхронизация при возврате в приложение (когда пользователь открывает мини-апп заново)
-                const handleVisibilityChange = () => {
+                // Обновление при возврате в приложение
+                const handleVisibility = () => {
                     if (document.visibilityState === 'visible') {
-                        fetchDataFromCloud();
+                        loadCloudData();
                     }
                 };
-                document.addEventListener('visibilitychange', handleVisibilityChange);
+                document.addEventListener('visibilitychange', handleVisibility);
 
-                // Поллинг (проверка каждые 15 секунд для открытого приложения)
-                const interval = setInterval(fetchDataFromCloud, 15000);
+                // Поллинг реже (каждые 30 сек), чтобы не спамить
+                const interval = setInterval(loadCloudData, 30000);
 
                 return () => {
-                    document.removeEventListener('visibilitychange', handleVisibilityChange);
+                    document.removeEventListener('visibilitychange', handleVisibility);
                     clearInterval(interval);
                 };
             }, []);
 
-            // Save
+            // Save (debounce или сразу)
             useEffect(() => {
                 if (!initialized) return;
-                
-                const dataStr = JSON.stringify(settings);
-                
-                // Сохранение в облако
-                if (window.Telegram?.WebApp?.CloudStorage) {
-                    window.Telegram.WebApp.CloudStorage.setItem(STORAGE_KEY, dataStr);
-                }
-                
-                // Локально
-                localStorage.setItem(STORAGE_KEY, dataStr);
-                
+                saveCloudData(settings);
             }, [settings, initialized]);
 
             // Theme
@@ -540,10 +587,27 @@
                 <div className="max-w-md mx-auto p-4 relative">
                     {/* Header */}
                     <div className="flex justify-between items-center mb-4">
-                        <h1 className="text-xl font-bold text-gray-900 dark:text-white">
-                            {isSelectionMode ? `Выбрано: ${selectedDates.size}` : "Мой График"}
-                        </h1>
+                        <div className="flex items-center">
+                            <h1 className="text-xl font-bold text-gray-900 dark:text-white">
+                                {isSelectionMode ? `Выбрано: ${selectedDates.size}` : "Мой График"}
+                            </h1>
+                            {/* Статус синхронизации */}
+                            {tg?.CloudStorage && (
+                                <span className={`sync-status ${syncStatus === 'ok' ? 'sync-ok' : syncStatus === 'fail' ? 'sync-fail' : 'sync-pending'}`}>
+                                    {syncStatus === 'ok' ? '☁️' : syncStatus === 'fail' ? '⚠️' : '🔄'}
+                                </span>
+                            )}
+                        </div>
                         <div className="flex gap-2">
+                             {/* Кнопка ручной синхронизации */}
+                             {tg?.CloudStorage && (
+                                <button onClick={loadCloudData} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition" title="Обновить данные">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                    </svg>
+                                </button>
+                             )}
+                             
                             <button onClick={() => setIsSelectionMode(!isSelectionMode)} 
                                 className={`p-2 rounded-full transition ${isSelectionMode ? 'bg-blue-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700'}`}>
                                 {isSelectionMode ? (
@@ -726,7 +790,15 @@
                             templates={settings.templates}
                         />
                     )}
-                    {showSettings && <SettingsScreen settings={settings} setSettings={setSettings} onClose={() => setShowSettings(false)} />}
+                    {showSettings && <SettingsScreen settings={settings} setSettings={setSettings} onClose={() => setShowSettings(false)} onClear={() => {
+                         setSettings(prev => ({
+                            ...prev,
+                            shifts: {},
+                            payments: {},
+                            bonuses: {}
+                        }));
+                        setShowSettings(false);
+                    }} />}
                 </div>
             );
         };
