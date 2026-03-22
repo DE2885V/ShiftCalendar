@@ -173,8 +173,6 @@
         const SettingsScreen = ({ settings, setSettings, onClose }) => {
             const [editingId, setEditingId] = useState(null);
             const [form, setForm] = useState({ name: '', hours: 8, rate: 500, color: '#3b82f6' });
-            
-            const fileInputRef = useRef(null);
 
             const resetForm = () => { setForm({ name: '', hours: 8, rate: 500, color: '#3b82f6' }); setEditingId(null); };
             const handleEdit = (tpl) => { 
@@ -210,41 +208,6 @@
                 if (editingId === id) resetForm();
             };
 
-            // --- Логика Экспорта (Файл) ---
-            const handleExport = () => {
-                const dataStr = JSON.stringify(settings, null, 2);
-                const blob = new Blob([dataStr], { type: "application/json" });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `shift_backup_${new Date().toISOString().slice(0,10)}.json`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-            };
-
-            const handleImportClick = () => fileInputRef.current.click();
-
-            const handleFileChange = (event) => {
-                const file = event.target.files[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    try {
-                        const importedData = JSON.parse(e.target.result);
-                        if (importedData.shifts && importedData.templates) {
-                            if (window.confirm("Загрузить данные из файла? Текущие данные будут заменены.")) {
-                                setSettings(importedData);
-                                alert("Данные успешно загружены!");
-                            }
-                        } else alert("Неверный формат файла.");
-                    } catch (err) { alert("Ошибка чтения файла."); }
-                };
-                reader.readAsText(file);
-                event.target.value = null;
-            };
-
             const handleClearData = () => {
                 if (window.confirm("Вы уверены, что хотите удалить все смены и выплаты?\nНастройки и шаблоны сохранятся.")) {
                     setSettings(prev => ({
@@ -253,7 +216,6 @@
                         payments: {},
                         bonuses: {}
                     }));
-                    alert("Данные календаря очищены.");
                 }
             };
 
@@ -266,22 +228,6 @@
 
                     <div className="p-4 flex-1 overflow-y-auto scrollbar-hide space-y-6">
                         
-                        {/* Резервное копирование */}
-                        <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm">
-                            <h3 className="font-bold text-gray-800 dark:text-white mb-2">Резервное копирование</h3>
-                            
-                            <button onClick={handleExport}
-                                className="w-full p-3 rounded-xl font-medium text-white bg-green-500 hover:bg-green-600 transition text-sm mb-2">
-                                📥 Сохранить в файл
-                            </button>
-
-                            <button onClick={handleImportClick}
-                                className="w-full p-3 rounded-xl font-medium text-blue-600 bg-blue-100 dark:bg-blue-900/50 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900 transition text-sm">
-                                📤 Загрузить из файла
-                            </button>
-                            <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".json" className="hidden" />
-                        </div>
-
                         {/* Налоги */}
                         <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm">
                             <h3 className="font-bold text-gray-800 dark:text-white mb-2">Налоги</h3>
@@ -401,29 +347,68 @@
 
             const [isSelectionMode, setIsSelectionMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
+            
+            // Ключ для хранения данных
+            const STORAGE_KEY = 'workShiftsAppDataV13';
 
             // Init
             useEffect(() => {
-                if (window.Telegram && window.Telegram.WebApp) {
-                    const tg = window.Telegram.WebApp;
+                const tg = window.Telegram?.WebApp;
+                if (tg) {
                     tg.ready();
                     tg.expand();
                 }
-                const savedData = localStorage.getItem('workShiftsAppDataV12'); // Версия 12
-                if (savedData) {
+
+                // Функция загрузки данных
+                const loadData = (dataStr) => {
                     try {
-                        const parsed = JSON.parse(savedData);
+                        const parsed = JSON.parse(dataStr);
                         if (parsed.templates) parsed.templates = parsed.templates.map(t => ({ ...t, hours: Number(t.hours) || 0, rate: Number(t.rate) || 0 }));
                         if (!parsed.bonuses) parsed.bonuses = {};
                         setSettings(prev => ({ ...prev, ...parsed }));
-                    } catch (e) { console.error("Load error", e); }
+                    } catch (e) { console.error("Parse error", e); }
+                    setInitialized(true);
+                };
+
+                // Пытаемся загрузить из Telegram Cloud
+                if (tg?.CloudStorage) {
+                    tg.CloudStorage.getItem(STORAGE_KEY, (err, value) => {
+                        if (!err && value) {
+                            loadData(value);
+                        } else {
+                            // Если в облаке пусто, пробуем локально (для первого запуска)
+                            const local = localStorage.getItem(STORAGE_KEY);
+                            if (local) {
+                                loadData(local);
+                                // Сразу сохраняем в облако, чтобы на другом устройстве подтянулось
+                                tg.CloudStorage.setItem(STORAGE_KEY, local);
+                            } else {
+                                setInitialized(true);
+                            }
+                        }
+                    });
+                } else {
+                    // Fallback для браузера
+                    const savedData = localStorage.getItem(STORAGE_KEY);
+                    if (savedData) loadData(savedData);
+                    else setInitialized(true);
                 }
-                setInitialized(true);
             }, []);
 
             // Save
             useEffect(() => {
-                if (initialized) localStorage.setItem('workShiftsAppDataV12', JSON.stringify(settings));
+                if (!initialized) return;
+                
+                const dataStr = JSON.stringify(settings);
+                
+                // Сохраняем в Telegram Cloud
+                if (window.Telegram?.WebApp?.CloudStorage) {
+                    window.Telegram.WebApp.CloudStorage.setItem(STORAGE_KEY, dataStr);
+                }
+                
+                // И всегда сохраняем локально (как кэш)
+                localStorage.setItem(STORAGE_KEY, dataStr);
+                
             }, [settings, initialized]);
 
             // Theme
