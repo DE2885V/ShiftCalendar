@@ -36,7 +36,6 @@
         input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
         .day-selected { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5); }
         
-        /* Marker styles */
         .holiday-marker {
             position: absolute;
             top: 0;
@@ -63,83 +62,125 @@
         
         const html = htm.bind(React.createElement);
 
-        // --- Calculator Engine v3 (Split Date Logic) ---
+        // --- Helper: Format Date Local ---
+        const getISODate = (date) => {
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        };
+
+        // --- Calculator Engine v3 (Linear Logic) ---
         const timeToMins = (t) => { if(!t) return 0; const [h, m] = t.split(':').map(Number); return h * 60 + m; };
         const getOverlap = (s1, e1, s2, e2) => Math.max(0, Math.min(e1, e2) - Math.max(s1, s2));
 
-        // Helper to get ISO date string for a linear minute count relative to a start anchor
-        const getDateForLinearMin = (anchorDate, mins) => {
-            const d = new Date(anchorDate);
-            d.setDate(d.getDate() + Math.floor(mins / 1440));
-            return d.toISOString().split('T')[0];
-        };
-
-        const calculateShiftStats = (shift, holidaysMap, shiftDate) => {
+        const calculateShiftStats = (shift, holidaysMap, shiftDateStr) => {
             if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, nightHours: 0, dayHours: 0, totalPay: 0 };
 
             // 1. Linearize Shift
             let sStart = timeToMins(shift.startTime);
             let sEnd = timeToMins(shift.endTime);
             if (sEnd < sStart) sEnd += 1440;
-
-            // 2. Normalize Lunch
+            // Shift is now [sStart, sEnd] on a linear scale where sStart is 0 to 1440
+            
+            // 2. Linearize Lunch
             let lStart = timeToMins(shift.lunchStart);
             let lEnd = timeToMins(shift.lunchEnd);
-            if (lEnd < lStart) lEnd += 1440;
-            if (lStart < sStart) { lStart += 1440; lEnd += 1440; }
+            if (lEnd < lStart) lEnd += 1440; // Lunch crosses midnight?
+            
+            // Align lunch to shift
+            // If lunch (e.g. 00:00) is "before" shift start (e.g. 22:00) linearly, it's actually next day's lunch
+            if (lStart < sStart) {
+                lStart += 1440;
+                lEnd += 1440;
+            }
+            
+            const shiftDur = sEnd - sStart;
+            const lunchDur = getOverlap(sStart, sEnd, lStart, lEnd);
+            const workDur = shiftDur - lunchDur;
 
+            // 3. Setup Night Intervals (Linear)
+            // Night definition
             const nStart = timeToMins(shift.nightStart || '22:00');
             const nEnd = timeToMins(shift.nightEnd || '06:00');
-            const rate = Number(shift.rate) || 0;
-            const nightBonus = (Number(shift.nightBonusPercent) || 0) / 100;
+            
+            // Intervals for "Day 0" (Anchor)
+            // Night usually wraps midnight: [N_Start, 1440] and [0, N_End]
+            // On linear scale (relative to shift start):
+            // Interval A: [N_Start, 1440]
+            // Interval B: [1440, 1440 + N_End]
+            // But we must handle if N_Start < N_End (e.g. day sleep)
+            
+            let nightIntervals = [];
+            // Case: Night wraps midnight (22:00-06:00)
+            if (nStart > nEnd) {
+                nightIntervals.push([nStart, 1440]); // Part 1 on anchor day
+                nightIntervals.push([1440, 1440 + nEnd]); // Part 2 on next day
+            } else {
+                // Case: Night is inside day (e.g. 01:00-05:00)
+                nightIntervals.push([nStart, nEnd]);
+                // If shift crosses midnight, we might need to check next day too
+                if (sEnd > 1440) {
+                     nightIntervals.push([nStart + 1440, nEnd + 1440]);
+                }
+            }
 
-            let totalPay = 0;
-            let totalMins = 0;
-            let totalNightMins = 0;
-
-            // Process segments: Part 1 (0-1440), Part 2 (1440 - end)
-            const segments = [
-                { start: sStart, end: Math.min(sEnd, 1440) }, // Anchor date part
-                { start: 1440, end: sEnd } // Next date part (if exists)
-            ];
-
-            segments.forEach(seg => {
-                if (seg.end <= seg.start) return;
-
-                // Determine which date this segment belongs to
-                // If seg.start is 0 (anchor start), it's anchor date.
-                // If seg.start is 1440, it's anchor date + 1 day.
-                const targetDate = getDateForLinearMin(shiftDate, seg.start);
-                const isHoliday = holidaysMap[targetDate] || false;
-
-                // Calculate Lunch in this segment
-                const segLunch = getOverlap(seg.start, seg.end, lStart, lEnd);
-                const segMins = (seg.end - seg.start) - segLunch;
-                totalMins += segMins;
-
-                // Calculate Night Hours in this segment
-                // Night is [nStart, 1440] and [0, nEnd], but linearized to [nStart, 1440] and [1440, 1440+nEnd]
-                let segNight = 0;
-                segNight += getOverlap(seg.start, seg.end, nStart, 1440);
-                segNight += getOverlap(seg.start, seg.end, 1440, 1440 + nEnd);
-
-                // Subtract lunch from night
-                const segNightLunch = getOverlap(lStart, lEnd, nStart, 1440) + getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
-                segNight -= segNightLunch;
-                
-                const segDay = segMins - segNight;
-                totalNightMins += segNight;
-
-                // Calc Pay
-                const mult = isHoliday ? 2 : 1;
-                totalPay += segDay / 60 * rate * mult;
-                totalPay += segNight / 60 * rate * mult * (1 + nightBonus);
+            // 4. Calculate Night Minutes
+            let nightMins = 0;
+            nightIntervals.forEach(int => {
+                // Overlap of Shift vs Night Interval
+                const rawNight = getOverlap(sStart, sEnd, int[0], int[1]);
+                // Overlap of Lunch vs Night Interval
+                const lunchNight = getOverlap(lStart, lEnd, int[0], int[1]);
+                nightMins += Math.max(0, rawNight - lunchNight);
             });
 
+            const dayMins = workDur - nightMins;
+
+            // 5. Calculate Pay (Split by Holidays)
+            let totalPay = 0;
+            
+            // Helper to process a segment
+            const process = (start, end, isHoliday) => {
+                const dur = (end - start) - getOverlap(start, end, lStart, lEnd);
+                if (dur <= 0) return 0;
+                
+                let night = 0;
+                nightIntervals.forEach(int => {
+                    night += Math.max(0, getOverlap(start, end, int[0], int[1]) - getOverlap(lStart, lEnd, int[0], int[1]));
+                });
+                
+                const day = dur - night;
+                const rate = Number(shift.rate) || 0;
+                const bonus = (Number(shift.nightBonusPercent) || 0) / 100;
+                const mult = isHoliday ? 2 : 1;
+                
+                return (day * rate * mult) + (night * rate * mult * (1 + bonus));
+            };
+
+            // Determine Holiday Split
+            // Anchor date string
+            const anchorDate = new Date(shiftDateStr);
+            const nextDate = new Date(shiftDateStr);
+            nextDate.setDate(nextDate.getDate() + 1);
+            const nextDateStr = getISODate(nextDate);
+
+            const isAnchorHoliday = holidaysMap[shiftDateStr] || false;
+            const isNextHoliday = holidaysMap[nextDateStr] || false;
+
+            // Part 1: Anchor Day (0 to 1440)
+            const p1End = Math.min(sEnd, 1440);
+            totalPay += process(sStart, p1End, isAnchorHoliday);
+
+            // Part 2: Next Day (1440+)
+            if (sEnd > 1440) {
+                totalPay += process(1440, sEnd, isNextHoliday);
+            }
+
             return {
-                totalHours: (totalMins / 60).toFixed(1),
-                nightHours: (totalNightMins / 60).toFixed(1),
-                dayHours: ((totalMins - totalNightMins) / 60).toFixed(1),
+                totalHours: (workDur / 60).toFixed(1),
+                nightHours: (nightMins / 60).toFixed(1),
+                dayHours: (dayMins / 60).toFixed(1),
                 totalPay: Math.round(totalPay)
             };
         };
@@ -190,8 +231,6 @@
                 }));
             };
 
-            // Calculate stats with holiday awareness
-            // We pass an object { [date]: holiday } map for the calculator
             const holidaysMap = { [date]: holiday };
             const stats = calculateShiftStats(form, holidaysMap, date);
 
@@ -315,6 +354,7 @@
         };
 
         const SettingsScreen = ({ settings, setSettings, onClose }) => {
+            // Same settings logic as before...
             const [editingId, setEditingId] = useState(null);
             const [form, setForm] = useState({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' });
 
@@ -344,7 +384,6 @@
                     </div>
                     <div className="p-4 flex-1 overflow-y-auto space-y-4">
                         
-                        <!-- Templates -->
                         <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm">
                             <h3 className="font-bold text-lg text-gray-800 dark:text-white mb-2">Шаблоны смен</h3>
                             <div className="space-y-2 mb-4">
@@ -425,7 +464,7 @@
                 shifts: {}, 
                 payments: {},
                 bonuses: {},
-                holidays: {}, // New state for holiday flags per date
+                holidays: {},
                 templates: [
                     { id: 1, name: "День", startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' },
                     { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '01:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#8b5cf6' }
@@ -442,7 +481,7 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            const KEYS = { CFG: 'v25_cfg', DATA: 'v25_data' };
+            const KEYS = { CFG: 'v26_cfg', DATA: 'v26_data' }; // Updated version keys
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
@@ -508,13 +547,18 @@
                 const d = []; let c = new Date(pStart);
                 const off = c.getDay() === 0 ? 6 : c.getDay() - 1;
                 for(let i=0; i<off; i++) d.push({type:'e'});
-                while(c <= pEnd) { d.push({type:'d', dt: new Date(c), iso: c.toISOString().split('T')[0]}); c.setDate(c.getDate()+1); }
+                while(c <= pEnd) {
+                    // FIX: Use local components to generate ISO string
+                    const iso = getISODate(c);
+                    d.push({type:'d', dt: new Date(c), iso: iso });
+                    c.setDate(c.getDate()+1);
+                }
                 return d;
             }, [pStart, pEnd]);
 
             const stats = useMemo(() => {
                 let h=0, gross=0, c=0, ps=0, adv=0, bon=0; 
-                const td = new Date().toISOString().split('T')[0];
+                const td = getISODate(new Date());
                 days.forEach(x => {
                     if(x.type === 'd') {
                         if(settings.shifts[x.iso]) {
@@ -613,7 +657,7 @@
                             const p = settings.payments[item.iso];
                             const b = settings.bonuses[item.iso];
                             const hol = settings.holidays[item.iso];
-                            const isTd = new Date().toDateString() === item.dt.toDateString();
+                            const isTd = getISODate(new Date()) === item.iso;
                             const isSelected = selectedDates.has(item.iso);
                             
                             return html`
@@ -627,7 +671,7 @@
                                         (isSelected ? ' day-selected z-10 ' : '')}
                                     style=${{ backgroundColor: s ? s.color : null }}>
                                     
-                                    <!-- Holiday Marker (Red Corner) -->
+                                    <!-- Holiday Marker -->
                                     ${hol && html`<div className="holiday-marker"></div>`}
                                     
                                     <!-- Payment Marker -->
