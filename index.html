@@ -35,6 +35,17 @@
         
         input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
         .day-selected { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5); }
+        
+        /* Marker styles */
+        .holiday-marker {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 0;
+            height: 0;
+            border-top: 20px solid #ef4444;
+            border-right: 20px solid transparent;
+        }
     </style>
 </head>
 <body>
@@ -52,18 +63,24 @@
         
         const html = htm.bind(React.createElement);
 
-        // --- Calculator Engine v2 ---
+        // --- Calculator Engine v3 (Split Date Logic) ---
         const timeToMins = (t) => { if(!t) return 0; const [h, m] = t.split(':').map(Number); return h * 60 + m; };
         const getOverlap = (s1, e1, s2, e2) => Math.max(0, Math.min(e1, e2) - Math.max(s1, s2));
 
-        const calculateShiftStats = (shift) => {
+        // Helper to get ISO date string for a linear minute count relative to a start anchor
+        const getDateForLinearMin = (anchorDate, mins) => {
+            const d = new Date(anchorDate);
+            d.setDate(d.getDate() + Math.floor(mins / 1440));
+            return d.toISOString().split('T')[0];
+        };
+
+        const calculateShiftStats = (shift, holidaysMap, shiftDate) => {
             if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, nightHours: 0, dayHours: 0, totalPay: 0 };
 
-            // 1. Linearize Time
+            // 1. Linearize Shift
             let sStart = timeToMins(shift.startTime);
             let sEnd = timeToMins(shift.endTime);
-            if (sEnd < sStart) sEnd += 1440; 
-            const shiftDuration = sEnd - sStart;
+            if (sEnd < sStart) sEnd += 1440;
 
             // 2. Normalize Lunch
             let lStart = timeToMins(shift.lunchStart);
@@ -73,60 +90,51 @@
 
             const nStart = timeToMins(shift.nightStart || '22:00');
             const nEnd = timeToMins(shift.nightEnd || '06:00');
-
             const rate = Number(shift.rate) || 0;
             const nightBonus = (Number(shift.nightBonusPercent) || 0) / 100;
-            const isHoliday = shift.isHoliday;
 
             let totalPay = 0;
             let totalMins = 0;
             let totalNightMins = 0;
 
-            // Helper to process a segment of time
-            const processSegment = (segStart, segEnd, applyHolidayBonus) => {
-                // 1. Subtract Lunch
-                const dur = segEnd - segStart - getOverlap(segStart, segEnd, lStart, lEnd);
-                if (dur <= 0) return;
-                totalMins += dur;
+            // Process segments: Part 1 (0-1440), Part 2 (1440 - end)
+            const segments = [
+                { start: sStart, end: Math.min(sEnd, 1440) }, // Anchor date part
+                { start: 1440, end: sEnd } // Next date part (if exists)
+            ];
 
-                // 2. Calculate Night Overlap
-                // Night is usually [nStart, 1440] and [0, nEnd].
-                // BUT segStart/segEnd are already linearized.
-                // For anchor day (0-1440): overlap with [nStart, 1440] & [0, nEnd].
-                // For next day (1440+): overlap with [nStart+1440, 2880] & [1440, nEnd+1440].
+            segments.forEach(seg => {
+                if (seg.end <= seg.start) return;
+
+                // Determine which date this segment belongs to
+                // If seg.start is 0 (anchor start), it's anchor date.
+                // If seg.start is 1440, it's anchor date + 1 day.
+                const targetDate = getDateForLinearMin(shiftDate, seg.start);
+                const isHoliday = holidaysMap[targetDate] || false;
+
+                // Calculate Lunch in this segment
+                const segLunch = getOverlap(seg.start, seg.end, lStart, lEnd);
+                const segMins = (seg.end - seg.start) - segLunch;
+                totalMins += segMins;
+
+                // Calculate Night Hours in this segment
+                // Night is [nStart, 1440] and [0, nEnd], but linearized to [nStart, 1440] and [1440, 1440+nEnd]
+                let segNight = 0;
+                segNight += getOverlap(seg.start, seg.end, nStart, 1440);
+                segNight += getOverlap(seg.start, seg.end, 1440, 1440 + nEnd);
+
+                // Subtract lunch from night
+                const segNightLunch = getOverlap(lStart, lEnd, nStart, 1440) + getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
+                segNight -= segNightLunch;
                 
-                let nightDur = 0;
-                if (segEnd <= 1440) {
-                    // Anchor Date segment
-                    nightDur += getOverlap(segStart, segEnd, nStart, 1440);
-                    nightDur += getOverlap(segStart, segEnd, 0, nEnd);
-                } else {
-                    // Next Date segment (relative to linear 1440+)
-                    nightDur += getOverlap(segStart, segEnd, nStart + 1440, 2880);
-                    nightDur += getOverlap(segStart, segEnd, 1440, nEnd + 1440);
-                }
+                const segDay = segMins - segNight;
+                totalNightMins += segNight;
 
-                const dayDur = dur - nightDur;
-                totalNightMins += nightDur;
-
-                // 3. Calc Pay
-                const mult = applyHolidayBonus ? 2 : 1;
-                totalPay += dayDur / 60 * rate * mult;
-                totalPay += nightDur / 60 * rate * mult * (1 + nightBonus);
-            };
-
-            // --- Process Part 1: Anchor Date (0 to 1440) ---
-            const p1End = Math.min(sEnd, 1440);
-            if (p1End > sStart) {
-                processSegment(sStart, p1End, isHoliday); // Holiday applies to anchor date if checked
-            }
-
-            // --- Process Part 2: Next Date (1440 to sEnd) ---
-            if (sEnd > 1440) {
-                const p2Start = 1440;
-                // Holiday bonus is FALSE for the next day (unless user creates a separate shift on that day)
-                processSegment(p2Start, sEnd, false); 
-            }
+                // Calc Pay
+                const mult = isHoliday ? 2 : 1;
+                totalPay += segDay / 60 * rate * mult;
+                totalPay += segNight / 60 * rate * mult * (1 + nightBonus);
+            });
 
             return {
                 totalHours: (totalMins / 60).toFixed(1),
@@ -138,14 +146,13 @@
 
         // --- Components ---
         
-        const ShiftModal = ({ show, onClose, date, shiftData, paymentData, bonusData, onSave, templates }) => {
+        const ShiftModal = ({ show, onClose, date, shiftData, paymentData, bonusData, isHoliday, onSave, onDelete, templates }) => {
             const getEmptyForm = () => ({
                 startTime: '08:00', endTime: '17:00',
                 lunchStart: '12:00', lunchEnd: '13:00',
                 rate: 525,
                 nightStart: '22:00', nightEnd: '06:00',
                 nightBonusPercent: 40,
-                isHoliday: false,
                 color: '#3b82f6',
                 note: ''
             });
@@ -153,6 +160,7 @@
             const [form, setForm] = useState(getEmptyForm());
             const [payment, setPayment] = useState(0);
             const [bonus, setBonus] = useState(0);
+            const [holiday, setHoliday] = useState(false);
 
             useEffect(() => {
                 if (show) {
@@ -160,8 +168,9 @@
                     else setForm(getEmptyForm());
                     setPayment(paymentData || 0);
                     setBonus(bonusData || 0);
+                    setHoliday(isHoliday || false);
                 }
-            }, [show, shiftData, paymentData, bonusData]);
+            }, [show, shiftData, paymentData, bonusData, isHoliday]);
 
             if (!show) return null;
 
@@ -176,16 +185,26 @@
                     rate: tpl.rate,
                     nightStart: tpl.nightStart, nightEnd: tpl.nightEnd,
                     nightBonusPercent: tpl.nightBonusPercent,
-                    isHoliday: tpl.isHoliday || false,
                     color: tpl.color,
                     note: tpl.name
                 }));
             };
 
-            const stats = calculateShiftStats(form);
+            // Calculate stats with holiday awareness
+            // We pass an object { [date]: holiday } map for the calculator
+            const holidaysMap = { [date]: holiday };
+            const stats = calculateShiftStats(form, holidaysMap, date);
+
             const save = () => { 
-                onSave(date, form, payment ? Number(payment) : null, bonus ? Number(bonus) : null); 
+                onSave(date, form, payment ? Number(payment) : null, bonus ? Number(bonus) : null, holiday); 
                 onClose(); 
+            };
+            
+            const handleDelete = () => {
+                if(confirm("Удалить смену за этот день?")) {
+                    onDelete(date);
+                    onClose();
+                }
             };
 
             return html`
@@ -198,6 +217,16 @@
                             </button>
                         </div>
                         <div className="space-y-4">
+                            
+                            <!-- Holiday Toggle -->
+                            <label className="flex items-center justify-between p-3 bg-red-50 dark:bg-red-900/20 rounded-xl cursor-pointer border border-red-200 dark:border-red-700">
+                                <div className="flex flex-col">
+                                    <span className="font-medium text-red-700 dark:text-red-300">Праздничный день</span>
+                                    <span className="text-[10px] text-red-400">Оплата часов этого дня: x2</span>
+                                </div>
+                                <input type="checkbox" checked=${holiday} onChange=${(e) => setHoliday(e.target.checked)} className="w-5 h-5 rounded text-red-600"/>
+                            </label>
+
                             <!-- Templates -->
                             <div className="flex flex-wrap gap-2">
                                 ${templates.map(tpl => html`
@@ -226,17 +255,14 @@
                                     <input type="time" value=${form.lunchEnd} onChange=${(e) => update('lunchEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
                                 </div>
                             </div>
-                            <!-- Rate & Holiday -->
+                            <!-- Rate -->
                             <div className="flex gap-2">
                                 <div className="flex-1 bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl">
                                     <label className="text-xs text-gray-500">Ставка (₽/ч)</label>
                                     <input type="number" value=${form.rate} onChange=${(e) => update('rate', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none font-bold"/>
                                 </div>
-                                <label className="flex items-end p-3 bg-yellow-50 dark:bg-yellow-900/30 rounded-xl cursor-pointer">
-                                    <input type="checkbox" checked=${form.isHoliday} onChange=${(e) => update('isHoliday', e.target.checked)} className="w-5 h-5 rounded"/>
-                                    <span className="ml-2 text-sm font-medium text-yellow-700 dark:text-yellow-300">Праздник (x2)</span>
-                                </label>
                             </div>
+                            
                             <!-- Night -->
                             <div className="bg-indigo-50 dark:bg-indigo-900/20 p-3 rounded-xl border border-indigo-100 dark:border-indigo-800">
                                 <div className="flex justify-between items-center mb-2">
@@ -274,7 +300,14 @@
                                     Д: ${stats.dayHours}ч + Н: ${stats.nightHours}ч
                                 </div>
                             </div>
+                            
                             <button onClick=${save} className="w-full p-3 rounded-xl text-white font-bold text-lg bg-blue-500 hover:bg-blue-600 transition">Сохранить</button>
+                            
+                            ${shiftData && html`
+                                <button onClick=${handleDelete} className="w-full p-3 rounded-xl font-bold text-red-500 border-2 border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-900/20 transition mt-2">
+                                    Удалить смену
+                                </button>
+                            `}
                         </div>
                     </div>
                 </div>
@@ -283,9 +316,9 @@
 
         const SettingsScreen = ({ settings, setSettings, onClose }) => {
             const [editingId, setEditingId] = useState(null);
-            const [form, setForm] = useState({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#3b82f6' });
+            const [form, setForm] = useState({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' });
 
-            const resetForm = () => { setForm({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#3b82f6' }); setEditingId(null); };
+            const resetForm = () => { setForm({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' }); setEditingId(null); };
             
             const handleEdit = (tpl) => { setForm(tpl); setEditingId(tpl.id); };
 
@@ -301,7 +334,7 @@
             };
 
             const handleDelete = (id) => setSettings(prev => ({...prev, templates: prev.templates.filter(t => t.id !== id)}));
-            const clear = () => { if(confirm("Очистить график?")) setSettings(p => ({...p, shifts: {}, payments: {}, bonuses: {}})); };
+            const clear = () => { if(confirm("Очистить график?")) setSettings(p => ({...p, shifts: {}, payments: {}, bonuses: {}, holidays: {}})); };
 
             return html`
                 <div className="fixed inset-0 bg-gray-100 dark:bg-gray-900 z-50 flex flex-col">
@@ -358,11 +391,6 @@
                                     </div>
                                 </div>
 
-                                <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
-                                    <input type="checkbox" checked=${form.isHoliday} onChange=${(e) => setForm(p => ({...p, isHoliday: e.target.checked}))} className="w-4 h-4 rounded"/>
-                                    Праздничный шаблон (x2)
-                                </label>
-
                                 <button onClick=${handleSave} className="w-full mt-2 p-2 rounded-lg text-white font-medium ${editingId ? 'bg-yellow-500' : 'bg-green-500'}">${editingId ? 'Сохранить' : 'Добавить'}</button>
                                 ${editingId && html`<button onClick=${resetForm} className="w-full mt-1 p-2 text-gray-500 text-sm">Отмена</button>`}
                             </div>
@@ -397,9 +425,10 @@
                 shifts: {}, 
                 payments: {},
                 bonuses: {},
+                holidays: {}, // New state for holiday flags per date
                 templates: [
-                    { id: 1, name: "День", startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#3b82f6' },
-                    { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '01:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#8b5cf6' }
+                    { id: 1, name: "День", startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' },
+                    { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '01:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#8b5cf6' }
                 ],
                 startDay: 1, theme: 'light', tax: 13
             });
@@ -413,7 +442,7 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            const KEYS = { CFG: 'v24_cfg', DATA: 'v24_data' };
+            const KEYS = { CFG: 'v25_cfg', DATA: 'v25_data' };
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
@@ -427,7 +456,8 @@
                             ...cfg,
                             shifts: data.shifts || {},
                             payments: data.payments || {},
-                            bonuses: data.bonuses || {}
+                            bonuses: data.bonuses || {},
+                            holidays: data.holidays || {}
                         }));
                         setSync('ok');
                     } catch(e) { console.error(e); setSync('fail'); }
@@ -446,9 +476,9 @@
 
             const save = (s) => {
                 try {
-                    const {shifts, payments, bonuses, ...cfg} = s;
+                    const {shifts, payments, bonuses, holidays, ...cfg} = s;
                     const cfgStr = JSON.stringify(cfg);
-                    const dataStr = JSON.stringify({shifts, payments, bonuses});
+                    const dataStr = JSON.stringify({shifts, payments, bonuses, holidays});
                     localStorage.setItem(KEYS.CFG, cfgStr);
                     localStorage.setItem(KEYS.DATA, dataStr);
                     if(tg?.CloudStorage) {
@@ -488,7 +518,7 @@
                 days.forEach(x => {
                     if(x.type === 'd') {
                         if(settings.shifts[x.iso]) {
-                            const s = calculateShiftStats(settings.shifts[x.iso]);
+                            const s = calculateShiftStats(settings.shifts[x.iso], settings.holidays, x.iso);
                             h += parseFloat(s.totalHours) || 0;
                             gross += s.totalPay || 0;
                             c++;
@@ -505,15 +535,24 @@
                 const remaining = net - adv;
                 
                 return { h: h.toFixed(1), gross, c, ps, adv, bon, tx, net, remaining };
-            }, [days, settings.shifts, settings.payments, settings.bonuses, settings.tax]);
+            }, [days, settings.shifts, settings.payments, settings.bonuses, settings.holidays, settings.tax]);
 
-            const saveShift = (d, sData, pAmount, bAmount) => {
+            const saveShift = (d, sData, pAmount, bAmount, isHol) => {
                 setSettings(p => ({
                     ...p, 
                     shifts: {...p.shifts, [d]: sData},
                     payments: {...p.payments, [d]: pAmount},
-                    bonuses: {...p.bonuses, [d]: bAmount}
+                    bonuses: {...p.bonuses, [d]: bAmount},
+                    holidays: {...p.holidays, [d]: isHol}
                 }));
+            };
+
+            const deleteShift = (d) => {
+                setSettings(p => {
+                    const ns = {...p.shifts}, np = {...p.payments}, nb = {...p.bonuses};
+                    delete ns[d]; delete np[d]; delete nb[d];
+                    return {...p, shifts: ns, payments: np, bonuses: nb};
+                });
             };
 
             const toggleDate = (iso) => {
@@ -573,6 +612,7 @@
                             const s = settings.shifts[item.iso];
                             const p = settings.payments[item.iso];
                             const b = settings.bonuses[item.iso];
+                            const hol = settings.holidays[item.iso];
                             const isTd = new Date().toDateString() === item.dt.toDateString();
                             const isSelected = selectedDates.has(item.iso);
                             
@@ -586,11 +626,18 @@
                                         (isTd ? ' ring-2 ring-blue-400 ring-offset-1 dark:ring-offset-gray-900 ' : '') +
                                         (isSelected ? ' day-selected z-10 ' : '')}
                                     style=${{ backgroundColor: s ? s.color : null }}>
-                                    <span className="font-bold text-sm">${item.dt.getDate()}</span>
-                                    ${s && html`<span className="text-[10px] opacity-90">${calculateShiftStats(s).totalHours}ч</span>`}
-                                    ${s?.isHoliday && html`<div className="absolute top-0 left-0 w-2 h-2 bg-yellow-400 rounded-full"></div>`}
+                                    
+                                    <!-- Holiday Marker (Red Corner) -->
+                                    ${hol && html`<div className="holiday-marker"></div>`}
+                                    
+                                    <!-- Payment Marker -->
                                     ${p && html`<div className="absolute top-0 right-0 w-2 h-2 bg-green-500 rounded-bl-full"></div>`}
+                                    
+                                    <!-- Bonus Marker -->
                                     ${b && html`<div className="absolute bottom-0 right-0 w-2 h-2 bg-yellow-500 rounded-tl-full flex items-center justify-center"><span class="text-[6px] text-white">★</span></div>`}
+                                    
+                                    <span className="font-bold text-sm">${item.dt.getDate()}</span>
+                                    ${s && html`<span className="text-[10px] opacity-90">${calculateShiftStats(s, settings.holidays, item.iso).totalHours}ч</span>`}
                                     
                                     ${isSelected && html`
                                         <div className="absolute inset-0 bg-blue-500/30 flex items-center justify-center">
@@ -670,7 +717,10 @@
                         shiftData=${settings.shifts[selDate]} 
                         paymentData=${settings.payments[selDate]} 
                         bonusData=${settings.bonuses[selDate]} 
-                        onSave=${saveShift} templates=${settings.templates} />`}
+                        isHoliday=${settings.holidays[selDate]} 
+                        onSave=${saveShift} 
+                        onDelete=${deleteShift}
+                        templates=${settings.templates} />`}
                     ${sett && html`<${SettingsScreen} settings=${settings} setSettings=${setSettings} onClose=${() => setSett(false)} />`}
                 </div>
             `;
