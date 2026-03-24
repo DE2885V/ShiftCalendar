@@ -39,7 +39,7 @@
         .sync-fail { background: #fee2e2; color: #991b1b; }
         .sync-pending { background: #fef3c7; color: #92400e; }
         
-        input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.5); }
+        input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
     </style>
 </head>
 <body>
@@ -51,18 +51,11 @@
     </div>
 
     <script type="module">
-        import React, { useState, useEffect, useMemo, useRef } from 'https://esm.sh/react@18.2.0';
+        import React, { useState, useEffect, useMemo } from 'https://esm.sh/react@18.2.0';
         import ReactDOM from 'https://esm.sh/react-dom@18.2.0/client';
         import htm from 'https://esm.sh/htm';
         
         const html = htm.bind(React.createElement);
-
-        // --- Helpers ---
-        const formatHeader = (start, end) => {
-            const months = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
-            if (start.getMonth() === end.getMonth()) return `${months[start.getMonth()]} ${start.getFullYear()}`;
-            return `${start.getDate()} ${months[start.getMonth()]} - ${end.getDate()} ${months[end.getMonth()]}`;
-        };
 
         // --- Calculator Engine ---
         const timeToMinutes = (timeStr) => {
@@ -71,132 +64,118 @@
             return h * 60 + m;
         };
 
+        // Расчет пересечения двух отрезков времени (в минутах)
+        const getOverlapMinutes = (start1, end1, start2, end2) => {
+            // start1, end1 - смена (линеаризованная)
+            // start2, end2 - ночь (линеаризованная)
+            const overlap = Math.max(0, Math.min(end1, end2) - Math.max(start1, start2));
+            return overlap;
+        };
+
         const calculateShiftStats = (shift) => {
             if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, nightHours: 0, dayHours: 0, totalPay: 0 };
 
             const start = timeToMinutes(shift.startTime);
             let end = timeToMinutes(shift.endTime);
             
-            // Обработка смены через полночь (например, 22:00 - 06:00)
+            // Если конец меньше начала, значит смена перешла через полночь
             if (end < start) end += 24 * 60;
 
-            let lunch = 0;
+            // Обед
+            let lunchMinutes = 0;
+            let lunchStartLinear = 0;
+            let lunchEndLinear = 0;
+
             if (shift.lunchStart && shift.lunchEnd) {
                 let lStart = timeToMinutes(shift.lunchStart);
                 let lEnd = timeToMinutes(shift.lunchEnd);
-                if (lEnd < lStart) lEnd += 24 * 60; // Если обед переходит полночь (маловероятно, но возможно)
                 
-                // Пересечение обеда и смены
-                const lunchOverlap = Math.max(0, Math.min(end, lEnd) - Math.max(start, lStart));
-                lunch = lunchOverlap;
+                // Линеаризуем обед относительно начала смены или суток
+                // Простой вариант: обед тоже может переходить полночь, но чаще всего он в пределах суток.
+                // Для надежности приводим к "линейному" времени от 0 до 2880 (48ч)
+                // Считаем, что обед в те же сутки, что и начало смены, либо корректируем
+                if (lEnd < lStart) lEnd += 24 * 60; // Обед перешел полночь
+                
+                // Если обед начался до начала смены (маловероятно, но возможно), пока упрощаем: 
+                // Обед считается в "абсолютных" минутах суток начала смены.
+                // Если смена 23:00-07:00, а обед 00:00-01:00, то lStart (0) < start (1380).
+                // Надо добавить 1440 к обеду, если он "вчера" или "завтра"? 
+                // Проще: обед всегда в [0, 1440]. Смена [start, end].
+                // Если смена захватывает следующий день, обед может быть в [0, end%1440].
+                
+                // Упрощенная логика для обеда:
+                // 1. Обед в первые сутки
+                lunchMinutes = getOverlapMinutes(start, end, lStart, lEnd);
+                
+                // 2. Обед во вторые сутки (если смена > 24ч, редкость, но для точности)
+                if (end > 1440) {
+                     lunchMinutes += getOverlapMinutes(start, end, lStart + 1440, lEnd + 1440);
+                }
             }
 
-            const totalWorkMinutes = (end - start) - lunch;
+            const totalWorkMinutes = (end - start) - lunchMinutes;
             const totalHours = totalWorkMinutes / 60;
 
-            // Расчет ночных часов
+            // Ночные часы
+            // Ночь задается параметрами, например 22:00 (1320 мин) до 06:00 (360 мин)
+            const nStart = timeToMinutes(shift.nightStart || '22:00');
+            const nEnd = timeToMinutes(shift.nightEnd || '06:00');
+            
             let nightMinutes = 0;
-            const nStart = timeToMinutes(shift.nightStart);
-            let nEnd = timeToMinutes(shift.nightEnd);
 
-            // Ночь обычно переходит полночь (22:00 - 06:00)
-            // Разбиваем ночь на два промежутка: [nStart, 24:00] и [00:00, nEnd]
-            // Но проще привести всё к "линейному" времени относительно старта смены
+            // Логика: Ночной интервал [N_Start, N_End].
+            // Если N_End < N_Start, значит ночь переходит полночь (22:00-06:00).
+            // Разбиваем на два интервала: [N_Start, 1440] и [0, N_End].
             
-            // Смена: [start, end]
-            // Ночь: [nStart, nEnd] (если nEnd < nStart, то это следующий день)
-            
-            // Функция проверки попадания минуты в ночное время
-            const isNight = (minute) => {
-                const h = (Math.floor(minute / 60) % 24);
-                const m = minute % 60;
-                const val = h * 60 + m; // Приводим к минутам суток
+            // Смена [Start, End].
+
+            if (nStart > nEnd) {
+                // Ночь переходит полночь
+                // Интервал 1: [N_Start, 1440]
+                nightMinutes += getOverlapMinutes(start, end, nStart, 1440);
+                // Интервал 2: [0, N_End]
+                nightMinutes += getOverlapMinutes(start, end, 0, nEnd);
                 
-                // Если ночь с 22 до 06
-                if (nStart > nEnd) {
-                    // С 22:00 до 24:00 ИЛИ с 00:00 до 06:00
-                    return val >= nStart || val < nEnd;
-                } else {
-                    return val >= nStart && val < nEnd;
+                // Если смена длинная и захватывает следующие сутки
+                if (end > 1440) {
+                     // Интервал 1 следующих суток
+                     nightMinutes += getOverlapMinutes(start, end, nStart + 1440, 1440 + 1440);
+                     // Интервал 2 следующих суток
+                     nightMinutes += getOverlapMinutes(start, end, 0 + 1440, nEnd + 1440);
                 }
-            };
-
-            // Проходим по каждой минуте смены (оптимизировано: шаг 15 мин для скорости отображения, точный расчет для итога)
-            // Для точности пройдем по каждой минуте
-            // Но для UI можно и приблизительно, однако для денег считаем точно
-            
-            // Считаем точно:
-            for (let i = start; i < end; i++) {
-                // Пропускаем обед
-                let isLunch = false;
-                if (shift.lunchStart && shift.lunchEnd) {
-                    let lStart = timeToMinutes(shift.lunchStart);
-                    let lEnd = timeToMinutes(shift.lunchEnd);
-                    // Нормализация обеда
-                    if (lEnd < lStart) lEnd += 24 * 60;
-                    
-                    // Проверка текущей минуты (i может быть > 24*60)
-                    const curTime = i % (24 * 60);
-                    
-                    // Проверяем попадание в обед
-                    // Тут сложнее с переходом суток. Самый простой способ - 
-                    // вычесть обед из смены заранее, а затем считать ночные часы в "чистом" времени.
-                    // НО: обед может быть днем, а ночь - ночью. 
-                    // Самый надежный способ: "нарезка" интервалов.
+            } else {
+                // Ночь в пределах суток (например, дневной сон?)
+                nightMinutes += getOverlapMinutes(start, end, nStart, nEnd);
+                if (end > 1440) {
+                    nightMinutes += getOverlapMinutes(start, end, nStart + 1440, nEnd + 1440);
                 }
             }
-            
-            // Оптимизированный алгоритм расчета ночного времени
-            // "Очищенное" время смены - это интервалы работы без обеда
-            // Для простоты предположим, что обед вычитается из общего времени, 
-            // а ночные часы считаются по валовому времени смены минус обед (если обед попал в ночь).
-            
-            // 1. Находим пересечение [start, end] с ночным интервалом
-            // Ночной интервал может быть: [N, 24:00] и [0, N_end]
-            
-            // Приведем всё к минутам суток (0-1440)
-            const minsInDay = 1440;
-            const night1Start = nStart;
-            const night1End = (nStart > nEnd) ? minsInDay : nEnd; // Первая часть ночи
-            const night2Start = (nStart > nEnd) ? 0 : null; // Вторая часть ночи (если переход через 00:00)
-            const night2End = (nStart > nEnd) ? nEnd : null;
 
-            // Функция расчета пересечения двух отрезков
-            const getOverlap = (s1, e1, s2, e2) => Math.max(0, Math.min(e1, e2) - Math.max(s1, s2));
-
-            // Смена [start, end]
-            // Обед [lStart, lEnd] (нормализованный)
-            let lStartNorm = timeToMinutes(shift.lunchStart);
-            let lEndNorm = timeToMinutes(shift.lunchEnd);
-            if (lEndNorm < lStartNorm) lEndNorm += 24 * 60;
-            if (lStartNorm < start) { // Если обед начался вчера (маловероятно для смены, но ок)
-                lStartNorm += 24 * 60;
-                lEndNorm += 24 * 60;
-            }
-
-            // Ищем ночные часы в валовом времени
-            let rawNightMinutes = 0;
+            // Вычитаем обед из ночных часов
+            // Это автоматически учтено, так как мы вычли lunchMinutes из общего времени,
+            // но нам нужно знать, сколько именно ночного времени было в обеде, чтобы корректно считать деньги.
+            // Чистые ночные часы = (Валовые ночные минуты) минус (Пересечение обеда и ночи)
             
-            // Проверяем часть ночи 1
-            rawNightMinutes += getOverlap(start, end, night1Start, night1End);
-            
-            // Проверяем часть ночи 2 (если есть)
-            if (night2Start !== null) {
-                rawNightMinutes += getOverlap(start, end, night2Start, night2End);
-                // Ночь может "обернуться" дважды для очень длинной смены > 24ч, но это редкость.
+            // Расчет "чистых" ночных часов для оплаты
+            // Валовые ночные мы посчитали выше.
+            // Нужно вычесть пересечение обеда и ночи.
+            let lunchInNight = 0;
+            if (lunchMinutes > 0) {
+                 if (nStart > nEnd) {
+                    lunchInNight += getOverlapMinutes(timeToMinutes(shift.lunchStart), timeToMinutes(shift.lunchEnd), nStart, 1440);
+                    lunchInNight += getOverlapMinutes(timeToMinutes(shift.lunchStart), timeToMinutes(shift.lunchEnd), 0, nEnd);
+                 } else {
+                    lunchInNight += getOverlapMinutes(timeToMinutes(shift.lunchStart), timeToMinutes(shift.lunchEnd), nStart, nEnd);
+                 }
+                 // Учет перехода обеда через полночь при расчете пересечения с ночью опустим для простоты,
+                 // так как обед обычно днем. Если обед попал в ночь - он вычитается из ночи.
             }
             
-            // Вычитаем обед из ночных часов, если обед попал в ночь
-            const lunchOverlapNight = getOverlap(lStartNorm, lEndNorm, night1Start, night1End) + 
-                                      (night2Start !== null ? getOverlap(lStartNorm, lEndNorm, night2Start, night2End) : 0);
-            
-            nightMinutes = rawNightMinutes - lunchOverlapNight;
-            if (nightMinutes < 0) nightMinutes = 0;
-
-            const nightHours = nightMinutes / 60;
+            const pureNightMinutes = nightMinutes - lunchInNight;
+            const nightHours = pureNightMinutes / 60;
             const dayHours = totalHours - nightHours;
 
-            // Расчет денег
+            // Деньги
             const rate = shift.rate || 0;
             const nightBonus = (shift.nightBonusPercent || 0) / 100;
             const isHoliday = shift.isHoliday || false;
@@ -218,26 +197,12 @@
         // --- Components ---
         
         const ShiftModal = ({ show, onClose, date, shiftData, onSave, templates }) => {
-            // Инициализация состояния
-            const [form, setForm] = useState({
-                templateId: null,
-                startTime: '08:00',
-                endTime: '17:00',
-                lunchStart: '12:00',
-                lunchEnd: '13:00',
-                rate: 525,
-                nightStart: '22:00',
-                nightEnd: '06:00',
-                nightBonusPercent: 40,
-                isHoliday: false,
-                color: '#3b82f6'
-            });
+            const [form, setForm] = useState({});
 
             useEffect(() => {
                 if (shiftData) {
-                    setForm({...shiftData});
+                    setForm(shiftData);
                 } else if (templates && templates.length > 0) {
-                    // Применяем первый шаблон по умолчанию
                     const def = templates[0];
                     setForm({
                         templateId: def.id,
@@ -289,11 +254,11 @@
                                 <div className="grid grid-cols-2 gap-2">
                                     <div>
                                         <label className="text-xs text-gray-500">Начало</label>
-                                        <input type="time" value=${form.startTime} onChange=${(e) => handleChange('startTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
+                                        <input type="time" value=${form.startTime || '08:00'} onChange=${(e) => handleChange('startTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
                                     </div>
                                     <div>
                                         <label className="text-xs text-gray-500">Конец</label>
-                                        <input type="time" value=${form.endTime} onChange=${(e) => handleChange('endTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
+                                        <input type="time" value=${form.endTime || '17:00'} onChange=${(e) => handleChange('endTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
                                     </div>
                                 </div>
                             </div>
@@ -302,8 +267,8 @@
                             <div className="bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl">
                                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Обед</span>
                                 <div className="grid grid-cols-2 gap-2 mt-2">
-                                    <input type="time" value=${form.lunchStart} onChange=${(e) => handleChange('lunchStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
-                                    <input type="time" value=${form.lunchEnd} onChange=${(e) => handleChange('lunchEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
+                                    <input type="time" value=${form.lunchStart || '12:00'} onChange=${(e) => handleChange('lunchStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
+                                    <input type="time" value=${form.lunchEnd || '13:00'} onChange=${(e) => handleChange('lunchEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
                                 </div>
                             </div>
 
@@ -311,11 +276,11 @@
                             <div className="flex gap-2">
                                 <div className="flex-1 bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl">
                                     <label className="text-xs text-gray-500">Ставка (₽/ч)</label>
-                                    <input type="number" value=${form.rate} onChange=${(e) => handleChange('rate', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none font-bold"/>
+                                    <input type="number" value=${form.rate || 525} onChange=${(e) => handleChange('rate', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none font-bold"/>
                                 </div>
                                 <div className="flex items-end">
                                     <label className="flex items-center p-3 bg-yellow-50 dark:bg-yellow-900/30 rounded-xl cursor-pointer h-full">
-                                        <input type="checkbox" checked=${form.isHoliday} onChange=${(e) => handleChange('isHoliday', e.target.checked)} className="w-5 h-5 text-yellow-500 rounded"/>
+                                        <input type="checkbox" checked=${form.isHoliday || false} onChange=${(e) => handleChange('isHoliday', e.target.checked)} className="w-5 h-5 text-yellow-500 rounded"/>
                                         <span className="ml-2 text-sm font-medium text-yellow-700 dark:text-yellow-300">Праздник (x2)</span>
                                     </label>
                                 </div>
@@ -330,15 +295,15 @@
                                 <div className="grid grid-cols-3 gap-2 items-end">
                                     <div>
                                         <label className="text-xs text-gray-500">С</label>
-                                        <input type="time" value=${form.nightStart} onChange=${(e) => handleChange('nightStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
+                                        <input type="time" value=${form.nightStart || '22:00'} onChange=${(e) => handleChange('nightStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
                                     </div>
                                     <div>
                                         <label className="text-xs text-gray-500">До</label>
-                                        <input type="time" value=${form.nightEnd} onChange=${(e) => handleChange('nightEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
+                                        <input type="time" value=${form.nightEnd || '06:00'} onChange=${(e) => handleChange('nightEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
                                     </div>
                                     <div>
                                         <label className="text-xs text-gray-500">Доплата %</label>
-                                        <input type="number" value=${form.nightBonusPercent} onChange=${(e) => handleChange('nightBonusPercent', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
+                                        <input type="number" value=${form.nightBonusPercent || 40} onChange=${(e) => handleChange('nightBonusPercent', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
                                     </div>
                                 </div>
                             </div>
@@ -363,13 +328,18 @@
 
         // --- Settings Screen ---
         const SettingsScreen = ({ settings, setSettings, onClose }) => {
-            const [tpl, setTpl] = useState(settings.templates[0] || {});
+            // Инициализируем tpl первым шаблоном или пустым объектом
+            const [tpl, setTpl] = useState(settings.templates[0] || { id: 1, name: "Смена" });
 
+            // Обновляем tpl при изменении settings извне
             useEffect(() => {
                 if (settings.templates[0]) setTpl(settings.templates[0]);
             }, [settings]);
 
-            const handleUpdate = (key, value) => setTpl(prev => ({...prev, [key]: value});
+            // Исправленная функция обновления
+            const handleUpdate = (key, value) => {
+                setTpl(prev => ({...prev, [key]: value}));
+            };
             
             const handleSave = () => {
                 setSettings(prev => ({...prev, templates: [tpl]}));
@@ -397,37 +367,37 @@
                             <div className="grid grid-cols-2 gap-2">
                                 <div>
                                     <label className="text-xs text-gray-500">Начало</label>
-                                    <input type="time" value=${tpl.startTime} onChange=${(e) => handleUpdate('startTime', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
+                                    <input type="time" value=${tpl.startTime || '08:00'} onChange=${(e) => handleUpdate('startTime', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
                                 </div>
                                 <div>
                                     <label className="text-xs text-gray-500">Конец</label>
-                                    <input type="time" value=${tpl.endTime} onChange=${(e) => handleUpdate('endTime', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
+                                    <input type="time" value=${tpl.endTime || '17:00'} onChange=${(e) => handleUpdate('endTime', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
                                 </div>
                             </div>
                             <div className="grid grid-cols-2 gap-2">
                                 <div>
                                     <label className="text-xs text-gray-500">Обед (нач)</label>
-                                    <input type="time" value=${tpl.lunchStart} onChange=${(e) => handleUpdate('lunchStart', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
+                                    <input type="time" value=${tpl.lunchStart || '12:00'} onChange=${(e) => handleUpdate('lunchStart', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
                                 </div>
                                 <div>
                                     <label className="text-xs text-gray-500">Обед (кон)</label>
-                                    <input type="time" value=${tpl.lunchEnd} onChange=${(e) => handleUpdate('lunchEnd', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
+                                    <input type="time" value=${tpl.lunchEnd || '13:00'} onChange=${(e) => handleUpdate('lunchEnd', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
                                 </div>
                             </div>
                             <div>
                                 <label className="text-xs text-gray-500">Ставка (₽/ч)</label>
-                                <input type="number" value=${tpl.rate} onChange=${(e) => handleUpdate('rate', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
+                                <input type="number" value=${tpl.rate || 525} onChange=${(e) => handleUpdate('rate', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
                             </div>
                             <hr className="dark:border-gray-700"/>
                             <h4 className="font-medium text-sm text-gray-700 dark:text-gray-300">Ночные настройки</h4>
                             <div className="grid grid-cols-3 gap-2">
-                                <input type="time" value=${tpl.nightStart} onChange=${(e) => handleUpdate('nightStart', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white text-xs"/>
-                                <input type="time" value=${tpl.nightEnd} onChange=${(e) => handleUpdate('nightEnd', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white text-xs"/>
-                                <input type="number" placeholder="%" value=${tpl.nightBonusPercent} onChange=${(e) => handleUpdate('nightBonusPercent', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
+                                <input type="time" value=${tpl.nightStart || '22:00'} onChange=${(e) => handleUpdate('nightStart', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white text-xs"/>
+                                <input type="time" value=${tpl.nightEnd || '06:00'} onChange=${(e) => handleUpdate('nightEnd', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white text-xs"/>
+                                <input type="number" placeholder="%" value=${tpl.nightBonusPercent || 40} onChange=${(e) => handleUpdate('nightBonusPercent', e.target.value)} className="w-full p-2 bg-gray-100 dark:bg-gray-700 rounded-lg dark:text-white"/>
                             </div>
                             <div>
                                 <label className="text-xs text-gray-500">Цвет</label>
-                                <input type="color" value=${tpl.color} onChange=${(e) => handleUpdate('color', e.target.value)} className="w-full h-10 rounded-lg cursor-pointer"/>
+                                <input type="color" value=${tpl.color || '#3b82f6'} onChange=${(e) => handleUpdate('color', e.target.value)} className="w-full h-10 rounded-lg cursor-pointer"/>
                             </div>
                         </div>
 
@@ -484,7 +454,7 @@
             const [showSettings, setShowSettings] = useState(false);
             const [periodOffset, setPeriodOffset] = useState(0);
 
-            const KEYS = { CONFIG: 'shifts_config_v18', SHIFTS: 'shifts_data_v18' }; // Упрощенное хранение (shifts теперь содержат всё)
+            const KEYS = { CONFIG: 'shifts_config_v18_fix', SHIFTS: 'shifts_data_v18_fix' };
             const tg = window.Telegram?.WebApp;
             
             const parseJson = (str) => { try { return str ? JSON.parse(str) : null; } catch (e) { return null; } };
@@ -493,7 +463,12 @@
                 setSyncStatus('pending');
                 if (tg?.CloudStorage) {
                     tg.CloudStorage.getItems([KEYS.CONFIG, KEYS.SHIFTS], (error, result) => {
-                        if (error) { setSyncStatus('fail'); setInitialized(true); return; }
+                        if (error) { 
+                            console.error("Cloud load error", error);
+                            setSyncStatus('fail'); 
+                            setInitialized(true); 
+                            return; 
+                        }
                         const config = parseJson(result[KEYS.CONFIG]);
                         const shifts = parseJson(result[KEYS.SHIFTS]);
                         
@@ -503,19 +478,20 @@
                             shifts: shifts || {}
                         }));
                         
-                        setSyncStatus('ok'); setInitialized(true);
+                        setSyncStatus('ok'); 
+                        setInitialized(true);
                     });
                 } else {
                     const config = parseJson(localStorage.getItem(KEYS.CONFIG));
                     const shifts = parseJson(localStorage.getItem(KEYS.SHIFTS));
                     setSettings(prev => ({...prev, ...(config || {}), shifts: shifts || {}}));
-                    setSyncStatus('ok'); setInitialized(true);
+                    setSyncStatus('ok'); 
+                    setInitialized(true);
                 }
             };
 
             const saveData = (newSettings) => {
                 setSyncStatus('pending');
-                // Отделяем shifts от остального
                 const { shifts, ...config } = newSettings;
                 
                 const configStr = JSON.stringify(config);
@@ -561,7 +537,7 @@
             }, [periodStart, periodEnd]);
 
             const stats = useMemo(() => {
-                let h=0, p=0, c=0, a=0, b=0, pass=0;
+                let h=0, p=0, c=0, b=0, pass=0;
                 const today = new Date().toISOString().split('T')[0];
                 
                 calendarDays.forEach(d => {
@@ -622,7 +598,7 @@
                     <!-- Grid -->
                     <div className="grid grid-cols-7 gap-1.5">
                         ${calendarDays.map(item => {
-                            if(item.type === 'empty') return html`<div key=${'e'+item.date} className="aspect-square"></div>`;
+                            if(item.type === 'empty') return html`<div key=${'e'+item.iso} className="aspect-square"></div>`;
                             const s = settings.shifts[item.iso];
                             const isToday = new Date().toDateString() === item.date.toDateString();
                             
