@@ -52,83 +52,88 @@
         
         const html = htm.bind(React.createElement);
 
-        // --- Calculator Engine ---
+        // --- Calculator Engine v2 ---
         const timeToMins = (t) => { if(!t) return 0; const [h, m] = t.split(':').map(Number); return h * 60 + m; };
         const getOverlap = (s1, e1, s2, e2) => Math.max(0, Math.min(e1, e2) - Math.max(s1, s2));
 
         const calculateShiftStats = (shift) => {
             if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, nightHours: 0, dayHours: 0, totalPay: 0 };
 
-            // 1. Линеаризация смены (приводим к непрерывному отрезку от sStart)
+            // 1. Linearize Time
             let sStart = timeToMins(shift.startTime);
             let sEnd = timeToMins(shift.endTime);
-            // Если конец меньше начала, значит переход через полночь
             if (sEnd < sStart) sEnd += 1440; 
-            // Длительность смены в минутах (грязная)
             const shiftDuration = sEnd - sStart;
 
-            // 2. Нормализация обеда
+            // 2. Normalize Lunch
             let lStart = timeToMins(shift.lunchStart);
             let lEnd = timeToMins(shift.lunchEnd);
-            
-            // Сначала чиним переход обеда через полночь (например 23:30 - 00:30)
             if (lEnd < lStart) lEnd += 1440;
+            if (lStart < sStart) { lStart += 1440; lEnd += 1440; }
 
-            // Затем совмещаем обед со сменой.
-            // Если обед начинается раньше смены (числово), это значит он на следующие сутки (для ночной смены)
-            // Пример: Смена 20:00 (1200), Обед 00:00 (0). 0 < 1200 => добавляем 1440 к обеду.
-            if (lStart < sStart) {
-                lStart += 1440;
-                lEnd += 1440;
-            }
-            // Если обед все еще сильно позже конца смены (не должно быть такого, но на всякий случай)
-            // Но обычно обед внутри смены.
-
-            // Вычисляем чистое время
-            const lunchMins = getOverlap(sStart, sEnd, lStart, lEnd);
-            const totalMins = shiftDuration - lunchMins;
-            const totalHours = totalMins / 60;
-
-            // 3. Расчет ночных часов
             const nStart = timeToMins(shift.nightStart || '22:00');
             const nEnd = timeToMins(shift.nightEnd || '06:00');
 
-            let nightMins = 0;
-            
-            // Ночь обычно переходит полночь: [N_Start, 1440] и [0, N_End]
-            // Мы должны проверить пересечение смены [sStart, sEnd] с этими интервалами
-            
-            // Часть ночи "сегодня" (до 24:00)
-            nightMins += getOverlap(sStart, sEnd, nStart, 1440);
-            // Часть ночи "завтра" (после 00:00) - она будет в диапазоне [1440, 1440+N_End]
-            nightMins += getOverlap(sStart, sEnd, 1440, 1440 + nEnd);
-            
-            // Если смена очень длинная (> 24ч), можно добавить цикл, но для смены <= 24ч этого достаточно.
-
-            // 4. Вычитаем обед из ночи
-            let lunchInNight = 0;
-            // Проверяем пересечение нормализованного обеда [lStart, lEnd] с нормализованной ночью
-            // Ночь "сегодня": [nStart, 1440]
-            lunchInNight += getOverlap(lStart, lEnd, nStart, 1440);
-            // Ночь "завтра": [1440, 1440 + nEnd]
-            lunchInNight += getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
-
-            const pureNightMins = Math.max(0, nightMins - lunchInNight);
-            const nightHours = pureNightMins / 60;
-            const dayHours = totalHours - nightHours;
-
-            // 5. Деньги
             const rate = Number(shift.rate) || 0;
-            const bonus = (Number(shift.nightBonusPercent) || 0) / 100;
-            const holiday = shift.isHoliday;
+            const nightBonus = (Number(shift.nightBonusPercent) || 0) / 100;
+            const isHoliday = shift.isHoliday;
 
-            const effRate = holiday ? rate * 2 : rate;
-            
-            const dayPay = dayHours * effRate;
-            const nightPay = nightHours * effRate * (1 + bonus);
-            const shiftPay = Math.round(dayPay + nightPay);
+            let totalPay = 0;
+            let totalMins = 0;
+            let totalNightMins = 0;
 
-            return { totalHours: totalHours.toFixed(1), nightHours: nightHours.toFixed(1), dayHours: dayHours.toFixed(1), totalPay: shiftPay };
+            // Helper to process a segment of time
+            const processSegment = (segStart, segEnd, applyHolidayBonus) => {
+                // 1. Subtract Lunch
+                const dur = segEnd - segStart - getOverlap(segStart, segEnd, lStart, lEnd);
+                if (dur <= 0) return;
+                totalMins += dur;
+
+                // 2. Calculate Night Overlap
+                // Night is usually [nStart, 1440] and [0, nEnd].
+                // BUT segStart/segEnd are already linearized.
+                // For anchor day (0-1440): overlap with [nStart, 1440] & [0, nEnd].
+                // For next day (1440+): overlap with [nStart+1440, 2880] & [1440, nEnd+1440].
+                
+                let nightDur = 0;
+                if (segEnd <= 1440) {
+                    // Anchor Date segment
+                    nightDur += getOverlap(segStart, segEnd, nStart, 1440);
+                    nightDur += getOverlap(segStart, segEnd, 0, nEnd);
+                } else {
+                    // Next Date segment (relative to linear 1440+)
+                    nightDur += getOverlap(segStart, segEnd, nStart + 1440, 2880);
+                    nightDur += getOverlap(segStart, segEnd, 1440, nEnd + 1440);
+                }
+
+                const dayDur = dur - nightDur;
+                totalNightMins += nightDur;
+
+                // 3. Calc Pay
+                const mult = applyHolidayBonus ? 2 : 1;
+                totalPay += dayDur / 60 * rate * mult;
+                totalPay += nightDur / 60 * rate * mult * (1 + nightBonus);
+            };
+
+            // --- Process Part 1: Anchor Date (0 to 1440) ---
+            const p1End = Math.min(sEnd, 1440);
+            if (p1End > sStart) {
+                processSegment(sStart, p1End, isHoliday); // Holiday applies to anchor date if checked
+            }
+
+            // --- Process Part 2: Next Date (1440 to sEnd) ---
+            if (sEnd > 1440) {
+                const p2Start = 1440;
+                // Holiday bonus is FALSE for the next day (unless user creates a separate shift on that day)
+                processSegment(p2Start, sEnd, false); 
+            }
+
+            return {
+                totalHours: (totalMins / 60).toFixed(1),
+                nightHours: (totalNightMins / 60).toFixed(1),
+                dayHours: ((totalMins - totalNightMins) / 60).toFixed(1),
+                totalPay: Math.round(totalPay)
+            };
         };
 
         // --- Components ---
@@ -188,7 +193,9 @@
                     <div className="bg-white dark:bg-gray-800 w-full max-w-lg rounded-t-3xl p-6 animate-slide-up max-h-[95vh] overflow-y-auto" onClick=${(e) => e.stopPropagation()}>
                         <div className="flex justify-between items-center mb-4">
                             <h2 className="text-xl font-bold text-gray-900 dark:text-white">${date}</h2>
-                            <button onClick=${onClose} className="text-gray-400 text-2xl">&times;</button>
+                            <button onClick=${onClose} className="text-gray-400 hover:text-gray-600 p-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth=${2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
                         </div>
                         <div className="space-y-4">
                             <!-- Templates -->
@@ -243,18 +250,17 @@
                                 </div>
                             </div>
 
-                            <!-- FINANCES: Premia & Advance -->
+                            <!-- FINANCES -->
                             <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-xl border border-yellow-200 dark:border-yellow-800">
-                                <label className="text-xs font-medium text-yellow-700 dark:text-yellow-300">Премия / Надбавка</label>
+                                <label className="text-xs font-medium text-yellow-700 dark:text-yellow-300">Премия</label>
                                 <div className="flex items-center gap-2 mt-1">
                                     <input type="number" placeholder="0" value=${bonus} onChange=${(e) => setBonus(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-yellow-600"/>
                                     <span className="text-yellow-600 font-bold">₽</span>
                                 </div>
-                                <p className="text-[10px] text-yellow-600 dark:text-yellow-500 mt-1 opacity-70">Добавится к начислению.</p>
                             </div>
 
                             <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-xl border border-green-200 dark:border-green-800">
-                                <label className="text-xs font-medium text-green-700 dark:text-green-300">Получено на руки (Аванс)</label>
+                                <label className="text-xs font-medium text-green-700 dark:text-green-300">Аванс</label>
                                 <div className="flex items-center gap-2 mt-1">
                                     <input type="number" placeholder="0" value=${payment} onChange=${(e) => setPayment(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-green-600"/>
                                     <span className="text-green-600 font-bold">₽</span>
@@ -393,7 +399,7 @@
                 bonuses: {},
                 templates: [
                     { id: 1, name: "День", startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#3b82f6' },
-                    { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '00:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#8b5cf6' }
+                    { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '01:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#8b5cf6' }
                 ],
                 startDay: 1, theme: 'light', tax: 13
             });
@@ -407,7 +413,7 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            const KEYS = { CFG: 'v23_cfg', DATA: 'v23_data' }; // Changed key to force fresh save with new logic if needed
+            const KEYS = { CFG: 'v24_cfg', DATA: 'v24_data' };
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
