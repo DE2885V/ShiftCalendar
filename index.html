@@ -59,33 +59,65 @@
         const calculateShiftStats = (shift) => {
             if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, nightHours: 0, dayHours: 0, totalPay: 0 };
 
+            // 1. Линеаризация смены (приводим к непрерывному отрезку от sStart)
             let sStart = timeToMins(shift.startTime);
             let sEnd = timeToMins(shift.endTime);
-            if (sEnd < sStart) sEnd += 1440;
+            // Если конец меньше начала, значит переход через полночь
+            if (sEnd < sStart) sEnd += 1440; 
+            // Длительность смены в минутах (грязная)
+            const shiftDuration = sEnd - sStart;
 
+            // 2. Нормализация обеда
             let lStart = timeToMins(shift.lunchStart);
             let lEnd = timeToMins(shift.lunchEnd);
-            if (lEnd < lStart) lEnd += 1440;
-            if (lStart < sStart && lEnd > sStart) { lStart += 1440; lEnd += 1440; }
             
+            // Сначала чиним переход обеда через полночь (например 23:30 - 00:30)
+            if (lEnd < lStart) lEnd += 1440;
+
+            // Затем совмещаем обед со сменой.
+            // Если обед начинается раньше смены (числово), это значит он на следующие сутки (для ночной смены)
+            // Пример: Смена 20:00 (1200), Обед 00:00 (0). 0 < 1200 => добавляем 1440 к обеду.
+            if (lStart < sStart) {
+                lStart += 1440;
+                lEnd += 1440;
+            }
+            // Если обед все еще сильно позже конца смены (не должно быть такого, но на всякий случай)
+            // Но обычно обед внутри смены.
+
+            // Вычисляем чистое время
             const lunchMins = getOverlap(sStart, sEnd, lStart, lEnd);
-            const totalMins = (sEnd - sStart) - lunchMins;
+            const totalMins = shiftDuration - lunchMins;
             const totalHours = totalMins / 60;
 
+            // 3. Расчет ночных часов
             const nStart = timeToMins(shift.nightStart || '22:00');
             const nEnd = timeToMins(shift.nightEnd || '06:00');
 
             let nightMins = 0;
+            
+            // Ночь обычно переходит полночь: [N_Start, 1440] и [0, N_End]
+            // Мы должны проверить пересечение смены [sStart, sEnd] с этими интервалами
+            
+            // Часть ночи "сегодня" (до 24:00)
             nightMins += getOverlap(sStart, sEnd, nStart, 1440);
-            nightMins += getOverlap(sStart, sEnd, 0, nEnd);
-            if (sEnd > 1440) { nightMins += getOverlap(sStart, sEnd, nStart + 1440, 2880); nightMins += getOverlap(sStart, sEnd, 1440, nEnd + 1440); }
+            // Часть ночи "завтра" (после 00:00) - она будет в диапазоне [1440, 1440+N_End]
+            nightMins += getOverlap(sStart, sEnd, 1440, 1440 + nEnd);
+            
+            // Если смена очень длинная (> 24ч), можно добавить цикл, но для смены <= 24ч этого достаточно.
 
-            let lunchInNight = getOverlap(lStart, lEnd, nStart, 1440) + getOverlap(lStart, lEnd, 0, nEnd);
+            // 4. Вычитаем обед из ночи
+            let lunchInNight = 0;
+            // Проверяем пересечение нормализованного обеда [lStart, lEnd] с нормализованной ночью
+            // Ночь "сегодня": [nStart, 1440]
+            lunchInNight += getOverlap(lStart, lEnd, nStart, 1440);
+            // Ночь "завтра": [1440, 1440 + nEnd]
+            lunchInNight += getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
 
             const pureNightMins = Math.max(0, nightMins - lunchInNight);
             const nightHours = pureNightMins / 60;
             const dayHours = totalHours - nightHours;
 
+            // 5. Деньги
             const rate = Number(shift.rate) || 0;
             const bonus = (Number(shift.nightBonusPercent) || 0) / 100;
             const holiday = shift.isHoliday;
@@ -218,7 +250,7 @@
                                     <input type="number" placeholder="0" value=${bonus} onChange=${(e) => setBonus(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-yellow-600"/>
                                     <span className="text-yellow-600 font-bold">₽</span>
                                 </div>
-                                <p className="text-[10px] text-yellow-600 dark:text-yellow-500 mt-1 opacity-70">Добавится к начислению (с вычетом налога).</p>
+                                <p className="text-[10px] text-yellow-600 dark:text-yellow-500 mt-1 opacity-70">Добавится к начислению.</p>
                             </div>
 
                             <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-xl border border-green-200 dark:border-green-800">
@@ -357,8 +389,8 @@
             const [init, setInit] = useState(false);
             const [settings, setSettings] = useState({
                 shifts: {}, 
-                payments: {}, // date: amount
-                bonuses: {},  // date: amount
+                payments: {},
+                bonuses: {},
                 templates: [
                     { id: 1, name: "День", startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#3b82f6' },
                     { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '00:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#8b5cf6' }
@@ -375,11 +407,7 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            // Use separate keys to avoid 4KB limit of Telegram Cloud
-            const KEYS = { 
-                CFG: 'v22_cfg', // templates, tax, theme, startDay
-                DATA: 'v22_data' // shifts, payments, bonuses
-            };
+            const KEYS = { CFG: 'v23_cfg', DATA: 'v23_data' }; // Changed key to force fresh save with new logic if needed
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
@@ -412,15 +440,11 @@
 
             const save = (s) => {
                 try {
-                    // Split state
                     const {shifts, payments, bonuses, ...cfg} = s;
-                    
                     const cfgStr = JSON.stringify(cfg);
                     const dataStr = JSON.stringify({shifts, payments, bonuses});
-                    
                     localStorage.setItem(KEYS.CFG, cfgStr);
                     localStorage.setItem(KEYS.DATA, dataStr);
-                    
                     if(tg?.CloudStorage) {
                         tg.CloudStorage.setItem(KEYS.CFG, cfgStr);
                         tg.CloudStorage.setItem(KEYS.DATA, dataStr);
