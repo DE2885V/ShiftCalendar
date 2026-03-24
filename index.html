@@ -70,96 +70,28 @@
             return `${y}-${m}-${d}`;
         };
 
-        // --- Calculator Engine v3 (Linear Logic) ---
+        // --- Calculator Engine v4 (Detailed Stats) ---
         const timeToMins = (t) => { if(!t) return 0; const [h, m] = t.split(':').map(Number); return h * 60 + m; };
         const getOverlap = (s1, e1, s2, e2) => Math.max(0, Math.min(e1, e2) - Math.max(s1, s2));
 
         const calculateShiftStats = (shift, holidaysMap, shiftDateStr) => {
-            if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, nightHours: 0, dayHours: 0, totalPay: 0 };
+            if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, totalPay: 0, breakdown: {} };
 
-            // 1. Linearize Shift
             let sStart = timeToMins(shift.startTime);
             let sEnd = timeToMins(shift.endTime);
             if (sEnd < sStart) sEnd += 1440;
-            // Shift is now [sStart, sEnd] on a linear scale where sStart is 0 to 1440
-            
-            // 2. Linearize Lunch
+
             let lStart = timeToMins(shift.lunchStart);
             let lEnd = timeToMins(shift.lunchEnd);
-            if (lEnd < lStart) lEnd += 1440; // Lunch crosses midnight?
-            
-            // Align lunch to shift
-            // If lunch (e.g. 00:00) is "before" shift start (e.g. 22:00) linearly, it's actually next day's lunch
-            if (lStart < sStart) {
-                lStart += 1440;
-                lEnd += 1440;
-            }
-            
-            const shiftDur = sEnd - sStart;
-            const lunchDur = getOverlap(sStart, sEnd, lStart, lEnd);
-            const workDur = shiftDur - lunchDur;
+            if (lEnd < lStart) lEnd += 1440;
+            if (lStart < sStart) { lStart += 1440; lEnd += 1440; }
 
-            // 3. Setup Night Intervals (Linear)
-            // Night definition
             const nStart = timeToMins(shift.nightStart || '22:00');
             const nEnd = timeToMins(shift.nightEnd || '06:00');
-            
-            // Intervals for "Day 0" (Anchor)
-            // Night usually wraps midnight: [N_Start, 1440] and [0, N_End]
-            // On linear scale (relative to shift start):
-            // Interval A: [N_Start, 1440]
-            // Interval B: [1440, 1440 + N_End]
-            // But we must handle if N_Start < N_End (e.g. day sleep)
-            
-            let nightIntervals = [];
-            // Case: Night wraps midnight (22:00-06:00)
-            if (nStart > nEnd) {
-                nightIntervals.push([nStart, 1440]); // Part 1 on anchor day
-                nightIntervals.push([1440, 1440 + nEnd]); // Part 2 on next day
-            } else {
-                // Case: Night is inside day (e.g. 01:00-05:00)
-                nightIntervals.push([nStart, nEnd]);
-                // If shift crosses midnight, we might need to check next day too
-                if (sEnd > 1440) {
-                     nightIntervals.push([nStart + 1440, nEnd + 1440]);
-                }
-            }
+            const rate = Number(shift.rate) || 0;
+            const nightBonus = (Number(shift.nightBonusPercent) || 0) / 100;
 
-            // 4. Calculate Night Minutes
-            let nightMins = 0;
-            nightIntervals.forEach(int => {
-                // Overlap of Shift vs Night Interval
-                const rawNight = getOverlap(sStart, sEnd, int[0], int[1]);
-                // Overlap of Lunch vs Night Interval
-                const lunchNight = getOverlap(lStart, lEnd, int[0], int[1]);
-                nightMins += Math.max(0, rawNight - lunchNight);
-            });
-
-            const dayMins = workDur - nightMins;
-
-            // 5. Calculate Pay (Split by Holidays)
-            let totalPay = 0;
-            
-            // Helper to process a segment
-            const process = (start, end, isHoliday) => {
-                const dur = (end - start) - getOverlap(start, end, lStart, lEnd);
-                if (dur <= 0) return 0;
-                
-                let night = 0;
-                nightIntervals.forEach(int => {
-                    night += Math.max(0, getOverlap(start, end, int[0], int[1]) - getOverlap(lStart, lEnd, int[0], int[1]));
-                });
-                
-                const day = dur - night;
-                const rate = Number(shift.rate) || 0;
-                const bonus = (Number(shift.nightBonusPercent) || 0) / 100;
-                const mult = isHoliday ? 2 : 1;
-                
-                return (day * rate * mult) + (night * rate * mult * (1 + bonus));
-            };
-
-            // Determine Holiday Split
-            // Anchor date string
+            // Determine dates
             const anchorDate = new Date(shiftDateStr);
             const nextDate = new Date(shiftDateStr);
             nextDate.setDate(nextDate.getDate() + 1);
@@ -168,20 +100,73 @@
             const isAnchorHoliday = holidaysMap[shiftDateStr] || false;
             const isNextHoliday = holidaysMap[nextDateStr] || false;
 
-            // Part 1: Anchor Day (0 to 1440)
-            const p1End = Math.min(sEnd, 1440);
-            totalPay += process(sStart, p1End, isAnchorHoliday);
-
-            // Part 2: Next Day (1440+)
+            // Segments to process
+            const segments = [];
             if (sEnd > 1440) {
-                totalPay += process(1440, sEnd, isNextHoliday);
+                segments.push({ start: sStart, end: 1440, isHoliday: isAnchorHoliday });
+                segments.push({ start: 1440, end: sEnd, isHoliday: isNextHoliday });
+            } else {
+                segments.push({ start: sStart, end: sEnd, isHoliday: isAnchorHoliday });
             }
 
+            let totalMins = 0;
+            let totalPay = 0;
+            
+            // Detailed Stats
+            let dayMins = 0; let nightMins = 0; let holidayMins = 0;
+            let dayPay = 0; let nightPay = 0; let holidayPay = 0;
+
+            segments.forEach(seg => {
+                // 1. Calculate work minutes in this segment
+                const segDur = (seg.end - seg.start) - getOverlap(seg.start, seg.end, lStart, lEnd);
+                if (segDur <= 0) return;
+                totalMins += segDur;
+
+                // 2. Calculate Night Minutes in this segment
+                let segNight = 0;
+                // Night logic: if Night wraps midnight (e.g. 22-06), it covers [nStart, 1440] and [0, nEnd] (linear: [1440, 1440+nEnd])
+                if (nStart > nEnd) {
+                    segNight += getOverlap(seg.start, seg.end, nStart, 1440); // Anchor night
+                    segNight += getOverlap(seg.start, seg.end, 1440, 1440 + nEnd); // Next day night
+                } else {
+                    segNight += getOverlap(seg.start, seg.end, nStart, nEnd);
+                }
+                // Subtract lunch from night
+                const lunchNight = getOverlap(lStart, lEnd, nStart, 1440) + getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
+                segNight = Math.max(0, segNight - lunchNight);
+
+                const segDay = segDur - segNight;
+
+                // 3. Calculate Pay
+                const mult = seg.isHoliday ? 2 : 1;
+                
+                // Pay logic
+                const baseNightPay = (segNight / 60) * rate * mult * (1 + nightBonus);
+                const baseDayPay = (segDay / 60) * rate * mult;
+
+                totalPay += baseDayPay + baseNightPay;
+
+                // Stats accumulation
+                if (seg.isHoliday) {
+                    holidayMins += segDur;
+                    holidayPay += baseDayPay + baseNightPay;
+                } else {
+                    dayMins += segDay;
+                    dayPay += baseDayPay;
+                    nightMins += segNight;
+                    nightPay += baseNightPay;
+                }
+            });
+
             return {
-                totalHours: (workDur / 60).toFixed(1),
-                nightHours: (nightMins / 60).toFixed(1),
-                dayHours: (dayMins / 60).toFixed(1),
-                totalPay: Math.round(totalPay)
+                totalHours: (totalMins / 60).toFixed(1),
+                totalPay: Math.round(totalPay),
+                breakdown: {
+                    dayMins, nightMins, holidayMins,
+                    dayPay: Math.round(dayPay),
+                    nightPay: Math.round(nightPay),
+                    holidayPay: Math.round(holidayPay)
+                }
             };
         };
 
@@ -245,6 +230,8 @@
                     onClose();
                 }
             };
+            
+            const bd = stats.breakdown;
 
             return html`
                 <div className="fixed inset-0 bg-black/50 flex items-end justify-center z-50" onClick=${onClose}>
@@ -306,7 +293,7 @@
                             <div className="bg-indigo-50 dark:bg-indigo-900/20 p-3 rounded-xl border border-indigo-100 dark:border-indigo-800">
                                 <div className="flex justify-between items-center mb-2">
                                     <span className="text-sm font-medium text-indigo-700 dark:text-indigo-300">Ночные</span>
-                                    <span className="text-xs text-indigo-500">Ночь: ${stats.nightHours} ч</span>
+                                    <span className="text-xs text-indigo-500">Ночь: ${(bd.nightMins/60).toFixed(1)} ч</span>
                                 </div>
                                 <div className="grid grid-cols-3 gap-2 items-end">
                                     <div><label className="text-xs text-gray-500">С</label><input type="time" value=${form.nightStart} onChange=${(e) => update('nightStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
@@ -332,12 +319,20 @@
                                 </div>
                             </div>
 
+                            <!-- DETAILED CALCULATION BLOCK -->
+                            <div className="bg-gray-100 dark:bg-gray-700/30 p-4 rounded-xl text-xs space-y-1 border dark:border-gray-600">
+                                <div className="flex justify-between font-bold text-gray-700 dark:text-gray-200 border-b dark:border-gray-600 pb-1 mb-1">
+                                    <span>Расчет смены:</span>
+                                    <span>${stats.totalHours} ч</span>
+                                </div>
+                                ${bd.dayMins > 0 && html`<div class="flex justify-between text-gray-600 dark:text-gray-400"><span>Дневные (${(bd.dayMins/60).toFixed(1)}ч)</span><span>${bd.dayPay.toLocaleString()} ₽</span></div>`}
+                                ${bd.nightMins > 0 && html`<div class="flex justify-between text-indigo-600 dark:text-indigo-400"><span>Ночные (${(bd.nightMins/60).toFixed(1)}ч)</span><span>${bd.nightPay.toLocaleString()} ₽</span></div>`}
+                                ${bd.holidayMins > 0 && html`<div class="flex justify-between text-red-600 dark:text-red-400 font-medium"><span>Праздничные (${(bd.holidayMins/60).toFixed(1)}ч x2)</span><span>${bd.holidayPay.toLocaleString()} ₽</span></div>`}
+                            </div>
+
                             <!-- Total -->
                             <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-xl text-center border border-green-200 dark:border-green-800">
                                 <div className="text-3xl font-bold text-green-600 dark:text-green-400">${stats.totalPay.toLocaleString()} ₽</div>
-                                <div className="text-xs text-green-700 dark:text-green-300 mt-1">
-                                    Д: ${stats.dayHours}ч + Н: ${stats.nightHours}ч
-                                </div>
                             </div>
                             
                             <button onClick=${save} className="w-full p-3 rounded-xl text-white font-bold text-lg bg-blue-500 hover:bg-blue-600 transition">Сохранить</button>
@@ -354,7 +349,6 @@
         };
 
         const SettingsScreen = ({ settings, setSettings, onClose }) => {
-            // Same settings logic as before...
             const [editingId, setEditingId] = useState(null);
             const [form, setForm] = useState({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' });
 
@@ -481,7 +475,7 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            const KEYS = { CFG: 'v26_cfg', DATA: 'v26_data' }; // Updated version keys
+            const KEYS = { CFG: 'v27_cfg', DATA: 'v27_data' };
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
@@ -548,7 +542,6 @@
                 const off = c.getDay() === 0 ? 6 : c.getDay() - 1;
                 for(let i=0; i<off; i++) d.push({type:'e'});
                 while(c <= pEnd) {
-                    // FIX: Use local components to generate ISO string
                     const iso = getISODate(c);
                     d.push({type:'d', dt: new Date(c), iso: iso });
                     c.setDate(c.getDate()+1);
@@ -557,8 +550,10 @@
             }, [pStart, pEnd]);
 
             const stats = useMemo(() => {
-                let h=0, gross=0, c=0, ps=0, adv=0, bon=0; 
+                let h=0, gross=0, c=0, ps=0, adv=0, bon=0;
+                let nightH=0, nightPay=0, holidayH=0, holidayPay=0;
                 const td = getISODate(new Date());
+                
                 days.forEach(x => {
                     if(x.type === 'd') {
                         if(settings.shifts[x.iso]) {
@@ -567,6 +562,13 @@
                             gross += s.totalPay || 0;
                             c++;
                             if(x.iso < td) ps++;
+                            
+                            // Detailed Aggregation
+                            const bd = s.breakdown;
+                            nightH += bd.nightMins / 60;
+                            nightPay += bd.nightPay;
+                            holidayH += bd.holidayMins / 60;
+                            holidayPay += bd.holidayPay;
                         }
                         if(settings.payments[x.iso]) adv += Number(settings.payments[x.iso]) || 0;
                         if(settings.bonuses[x.iso]) bon += Number(settings.bonuses[x.iso]) || 0;
@@ -578,7 +580,11 @@
                 const net = totalGross - tx;
                 const remaining = net - adv;
                 
-                return { h: h.toFixed(1), gross, c, ps, adv, bon, tx, net, remaining };
+                return { 
+                    h: h.toFixed(1), gross, c, ps, adv, bon, tx, net, remaining,
+                    nightH: nightH.toFixed(1), nightPay,
+                    holidayH: holidayH.toFixed(1), holidayPay
+                };
             }, [days, settings.shifts, settings.payments, settings.bonuses, settings.holidays, settings.tax]);
 
             const saveShift = (d, sData, pAmount, bAmount, isHol) => {
@@ -660,6 +666,8 @@
                             const isTd = getISODate(new Date()) === item.iso;
                             const isSelected = selectedDates.has(item.iso);
                             
+                            const dayStats = s ? calculateShiftStats(s, settings.holidays, item.iso) : null;
+                            
                             return html`
                                 <div key=${item.iso} onClick=${() => {
                                     if(isSelectMode) toggleDate(item.iso);
@@ -681,7 +689,13 @@
                                     ${b && html`<div className="absolute bottom-0 right-0 w-2 h-2 bg-yellow-500 rounded-tl-full flex items-center justify-center"><span class="text-[6px] text-white">★</span></div>`}
                                     
                                     <span className="font-bold text-sm">${item.dt.getDate()}</span>
-                                    ${s && html`<span className="text-[10px] opacity-90">${calculateShiftStats(s, settings.holidays, item.iso).totalHours}ч</span>`}
+                                    ${dayStats && html`
+                                        <div className="text-[8px] opacity-80 leading-tight text-center">
+                                            <span>${dayStats.totalHours}ч</span>
+                                            <br/>
+                                            <span class="font-bold">${dayStats.totalPay}₽</span>
+                                        </div>
+                                    `}
                                     
                                     ${isSelected && html`
                                         <div className="absolute inset-0 bg-blue-500/30 flex items-center justify-center">
@@ -737,7 +751,31 @@
                             <div className="bg-white dark:bg-gray-800 p-3 rounded-2xl shadow-sm border border-green-200"><div className="text-xl font-bold text-green-500">${stats.ps}</div><div className="text-[10px] text-gray-500">Прошло</div></div>
                         </div>
 
-                        <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm">
+                        <!-- Detailed Breakdown -->
+                        <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm space-y-3">
+                            
+                            ${stats.holidayH > 0 && html`
+                                <div className="flex justify-between items-center text-sm border-b dark:border-gray-700 pb-2">
+                                    <div class="flex items-center gap-2">
+                                        <span class="w-2 h-2 rounded-full bg-red-500"></span>
+                                        <span className="text-gray-600 dark:text-gray-300">Праздничные</span>
+                                        <span className="text-xs text-gray-400">(${stats.holidayH}ч)</span>
+                                    </div>
+                                    <span className="font-bold text-red-500">${stats.holidayPay.toLocaleString()} ₽</span>
+                                </div>
+                            `}
+
+                            ${stats.nightH > 0 && html`
+                                <div className="flex justify-between items-center text-sm border-b dark:border-gray-700 pb-2">
+                                    <div class="flex items-center gap-2">
+                                        <span class="w-2 h-2 rounded-full bg-indigo-500"></span>
+                                        <span className="text-gray-600 dark:text-gray-300">Ночные</span>
+                                        <span className="text-xs text-gray-400">(${stats.nightH}ч)</span>
+                                    </div>
+                                    <span className="font-bold text-indigo-500">${stats.nightPay.toLocaleString()} ₽</span>
+                                </div>
+                            `}
+
                             <div className="flex justify-between mb-1 text-sm"><span className="text-gray-500">Начислено (ЗП)</span><span className="font-bold">${stats.gross.toLocaleString()} ₽</span></div>
                             ${stats.bon > 0 && html`<div className="flex justify-between text-sm text-gray-400"><span>Премии</span><span className="text-yellow-500">+ ${stats.bon.toLocaleString()} ₽</span></div>`}
                             <div className="flex justify-between text-sm text-gray-400"><span>Налог (${settings.tax}%)</span><span class="text-red-400">- ${stats.tx.toLocaleString()} ₽</span></div>
