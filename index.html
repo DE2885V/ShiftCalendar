@@ -398,8 +398,16 @@
                          <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm">
                             <h3 className="font-bold text-gray-800 dark:text-white mb-3">Тема</h3>
                             <div className="flex gap-2">
-                                <button onClick=${() => setSettings(p => ({...p, theme: 'light'}))} className=${'flex-1 p-3 rounded-xl font-medium transition ' + (settings.theme === 'light' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300')}>☀️ Светлая</button>
-                                <button onClick=${() => setSettings(p => ({...p, theme: 'dark'}))} className=${'flex-1 p-3 rounded-xl font-medium transition ' + (settings.theme === 'dark' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300')}>🌙 Темная</button>
+                                <button 
+                                    onClick=${() => setSettings(p => ({...p, theme: 'light'}))} 
+                                    className=${'flex-1 p-3 rounded-xl font-medium transition ' + (settings.theme === 'light' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300')}>
+                                    ☀️ Светлая
+                                </button>
+                                <button 
+                                    onClick=${() => setSettings(p => ({...p, theme: 'dark'}))} 
+                                    className=${'flex-1 p-3 rounded-xl font-medium transition ' + (settings.theme === 'dark' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300')}>
+                                    🌙 Темная
+                                </button>
                             </div>
                         </div>
 
@@ -431,20 +439,26 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            const KEYS = { C: 'v20_cfg', S: 'v20_shifts' };
+            const KEYS = { C: 'v21_cfg', S: 'v21_shifts' };
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
                 setSync('pending');
                 const done = (c, s) => {
-                    const cfg = c ? JSON.parse(c) : {};
-                    const sh = s ? JSON.parse(s) : {};
-                    setSettings(p => {
-                        const merged = {...p, ...cfg, shifts: sh || {}};
-                        if(!merged.templates || merged.templates.length === 0) merged.templates = p.templates;
-                        return merged;
-                    });
-                    setSync('ok'); setInit(true);
+                    try {
+                        const cfg = c ? JSON.parse(c) : {};
+                        const sh = s ? JSON.parse(s) : {};
+                        setSettings(p => {
+                            const merged = {...p, ...cfg, shifts: sh || {}};
+                            if(!merged.templates || merged.templates.length === 0) merged.templates = p.templates;
+                            return merged;
+                        });
+                        setSync('ok');
+                    } catch (e) { 
+                        console.error("Load error", e);
+                        setSync('fail');
+                    }
+                    setInit(true);
                 };
                 
                 if(tg?.CloudStorage) {
@@ -458,14 +472,18 @@
             };
 
             const save = (s) => {
-                const {shifts, ...cfg} = s;
-                const cs = JSON.stringify(cfg);
-                const ss = JSON.stringify(shifts);
-                localStorage.setItem(KEYS.C, cs);
-                localStorage.setItem(KEYS.S, ss);
-                if(tg?.CloudStorage) {
-                    tg.CloudStorage.setItem(KEYS.C, cs);
-                    tg.CloudStorage.setItem(KEYS.S, ss);
+                try {
+                    const {shifts, ...cfg} = s;
+                    const cs = JSON.stringify(cfg);
+                    const ss = JSON.stringify(shifts);
+                    localStorage.setItem(KEYS.C, cs);
+                    localStorage.setItem(KEYS.S, ss);
+                    if(tg?.CloudStorage) {
+                        tg.CloudStorage.setItem(KEYS.C, cs);
+                        tg.CloudStorage.setItem(KEYS.S, ss);
+                    }
+                } catch (e) {
+                    console.error("Save error", e);
                 }
             };
 
@@ -476,7 +494,12 @@
             }, []);
 
             useEffect(() => { if(init) save(settings); }, [settings, init]);
-            useEffect(() => document.body.classList.toggle('dark', settings.theme === 'dark'), [settings.theme]);
+            
+            useEffect(() => {
+                try {
+                    document.body.classList.toggle('dark', settings.theme === 'dark');
+                } catch(e) { console.error(e); }
+            }, [settings.theme]);
 
             const { pStart, pEnd, dTitle } = useMemo(() => {
                 const t = new Date(); const m = t.getMonth() + offset; const y = t.getFullYear();
