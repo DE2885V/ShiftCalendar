@@ -35,6 +35,8 @@
         .sync-pending { background: #fef3c7; color: #92400e; }
         
         input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
+        
+        .day-selected { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5); }
     </style>
 </head>
 <body>
@@ -71,8 +73,7 @@
             let lStart = timeToMins(shift.lunchStart);
             let lEnd = timeToMins(shift.lunchEnd);
             if (lEnd < lStart) lEnd += 1440;
-            
-            if (lStart < sStart && lEnd > sStart) { lStart += 1440; lEnd += 1440; } // Обед на след сутки
+            if (lStart < sStart && lEnd > sStart) { lStart += 1440; lEnd += 1440; }
             
             const lunchMins = getOverlap(sStart, sEnd, lStart, lEnd);
             const totalMins = (sEnd - sStart) - lunchMins;
@@ -154,6 +155,7 @@
                     nightStart: tpl.nightStart,
                     nightEnd: tpl.nightEnd,
                     nightBonusPercent: tpl.nightBonusPercent,
+                    isHoliday: tpl.isHoliday || false,
                     color: tpl.color,
                     note: tpl.name
                 }));
@@ -170,7 +172,7 @@
                             <button onClick=${onClose} className="text-gray-400 text-2xl">&times;</button>
                         </div>
                         <div className="space-y-4">
-                            <!-- Шаблоны -->
+                            <!-- Templates -->
                             <div className="flex flex-wrap gap-2">
                                 <span className="text-xs text-gray-500 w-full mb-1">Шаблоны:</span>
                                 ${templates.map(tpl => html`
@@ -255,9 +257,26 @@
 
         const SettingsScreen = ({ settings, setSettings, onClose }) => {
             const [editingId, setEditingId] = useState(null);
-            const [form, setForm] = useState({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' });
+            const [form, setForm] = useState({ 
+                name: '', 
+                startTime: '08:00', endTime: '17:00', 
+                lunchStart: '12:00', lunchEnd: '13:00', 
+                rate: 525, 
+                nightStart: '22:00', nightEnd: '06:00', 
+                nightBonusPercent: 40, 
+                isHoliday: false,
+                color: '#3b82f6' 
+            });
 
-            const resetForm = () => { setForm({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' }); setEditingId(null); };
+            const resetForm = () => { 
+                setForm({ 
+                    name: '', startTime: '08:00', endTime: '17:00', 
+                    lunchStart: '12:00', lunchEnd: '13:00', rate: 525, 
+                    nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, 
+                    isHoliday: false, color: '#3b82f6' 
+                }); 
+                setEditingId(null); 
+            };
             
             const handleEdit = (tpl) => { setForm(tpl); setEditingId(tpl.id); };
 
@@ -310,15 +329,59 @@
                                 `)}
                             </div>
                             
-                            <div className="border-t dark:border-gray-700 pt-3">
-                                <h4 className="text-sm font-medium text-gray-500 mb-2">${editingId ? 'Редактирование' : 'Новый шаблон'}</h4>
-                                <input placeholder="Название" value=${form.name} onChange=${(e) => setForm(p => ({...p, name: e.target.value}))} className="w-full p-2 mb-2 rounded-lg bg-gray-100 dark:bg-gray-700 dark:text-white text-sm"/>
-                                <div className="grid grid-cols-2 gap-2 text-xs">
-                                    <input type="time" value=${form.startTime} onChange=${(e) => setForm(p => ({...p, startTime: e.target.value}))} className="p-2 rounded-lg bg-gray-100 dark:bg-gray-700 dark:text-white"/>
-                                    <input type="time" value=${form.endTime} onChange=${(e) => setForm(p => ({...p, endTime: e.target.value}))} className="p-2 rounded-lg bg-gray-100 dark:bg-gray-700 dark:text-white"/>
-                                    <input type="number" placeholder="Ставка" value=${form.rate} onChange=${(e) => setForm(p => ({...p, rate: e.target.value}))} className="p-2 rounded-lg bg-gray-100 dark:bg-gray-700 dark:text-white"/>
-                                    <input type="color" value=${form.color} onChange=${(e) => setForm(p => ({...p, color: e.target.value}))} className="h-9 rounded-lg cursor-pointer"/>
+                            <div className="border-t dark:border-gray-700 pt-3 space-y-3">
+                                <h4 className="text-sm font-medium text-gray-500">${editingId ? 'Редактирование' : 'Новый шаблон'}</h4>
+                                
+                                <input placeholder="Название шаблона" value=${form.name} onChange=${(e) => setForm(p => ({...p, name: e.target.value}))} className="w-full p-2 rounded-lg bg-gray-100 dark:bg-gray-700 dark:text-white text-sm border-none outline-none font-medium"/>
+                                
+                                <!-- Time -->
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <label className="text-xs text-gray-400">Начало</label>
+                                        <input type="time" value=${form.startTime} onChange=${(e) => setForm(p => ({...p, startTime: e.target.value}))} className="w-full p-2 bg-gray-100 dark:bg-gray-700 dark:text-white rounded-lg"/>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400">Конец</label>
+                                        <input type="time" value=${form.endTime} onChange=${(e) => setForm(p => ({...p, endTime: e.target.value}))} className="w-full p-2 bg-gray-100 dark:bg-gray-700 dark:text-white rounded-lg"/>
+                                    </div>
                                 </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <label className="text-xs text-gray-400">Обед (с)</label>
+                                        <input type="time" value=${form.lunchStart} onChange=${(e) => setForm(p => ({...p, lunchStart: e.target.value}))} className="w-full p-2 bg-gray-100 dark:bg-gray-700 dark:text-white rounded-lg"/>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400">Обед (по)</label>
+                                        <input type="time" value=${form.lunchEnd} onChange=${(e) => setForm(p => ({...p, lunchEnd: e.target.value}))} className="w-full p-2 bg-gray-100 dark:bg-gray-700 dark:text-white rounded-lg"/>
+                                    </div>
+                                </div>
+
+                                <div className="flex gap-2">
+                                    <div className="flex-1">
+                                        <label className="text-xs text-gray-400">Ставка</label>
+                                        <input type="number" value=${form.rate} onChange=${(e) => setForm(p => ({...p, rate: e.target.value}))} className="w-full p-2 bg-gray-100 dark:bg-gray-700 dark:text-white rounded-lg"/>
+                                    </div>
+                                    <div className="flex-1">
+                                        <label className="text-xs text-gray-400">Цвет</label>
+                                        <input type="color" value=${form.color} onChange=${(e) => setForm(p => ({...p, color: e.target.value}))} className="w-full h-10 rounded-lg cursor-pointer bg-transparent"/>
+                                    </div>
+                                </div>
+
+                                <!-- Night Settings in Template -->
+                                <div class="bg-indigo-50 dark:bg-indigo-900/20 p-2 rounded-lg text-xs space-y-2">
+                                    <div class="font-medium text-indigo-600">Ночные настройки</div>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        <input type="time" value=${form.nightStart} onChange=${(e) => setForm(p => ({...p, nightStart: e.target.value}))} className="w-full p-1 bg-white dark:bg-gray-800 rounded border dark:border-gray-700"/>
+                                        <input type="time" value=${form.nightEnd} onChange=${(e) => setForm(p => ({...p, nightEnd: e.target.value}))} className="w-full p-1 bg-white dark:bg-gray-800 rounded border dark:border-gray-700"/>
+                                        <input type="number" placeholder="%" value=${form.nightBonusPercent} onChange=${(e) => setForm(p => ({...p, nightBonusPercent: e.target.value}))} className="w-full p-1 bg-white dark:bg-gray-800 rounded border dark:border-gray-700"/>
+                                    </div>
+                                </div>
+
+                                <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                                    <input type="checkbox" checked=${form.isHoliday} onChange=${(e) => setForm(p => ({...p, isHoliday: e.target.checked}))} className="w-4 h-4 rounded"/>
+                                    Праздничный шаблон (x2)
+                                </label>
+
                                 <button onClick=${handleSave} className="w-full mt-2 p-2 rounded-lg text-white font-medium ${editingId ? 'bg-yellow-500' : 'bg-green-500'}">${editingId ? 'Сохранить' : 'Добавить'}</button>
                                 ${editingId && html`<button onClick=${resetForm} className="w-full mt-1 p-2 text-gray-500 text-sm">Отмена</button>`}
                             </div>
@@ -352,8 +415,8 @@
             const [settings, setSettings] = useState({
                 shifts: {}, 
                 templates: [
-                    { id: 1, name: "День", startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' },
-                    { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '00:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#8b5cf6' }
+                    { id: 1, name: "День", startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#3b82f6' },
+                    { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '00:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, isHoliday: false, color: '#8b5cf6' }
                 ],
                 startDay: 1, theme: 'light', tax: 13
             });
@@ -364,7 +427,11 @@
             const [sett, setSett] = useState(false);
             const [offset, setOffset] = useState(0);
 
-            const KEYS = { C: 'v19_cfg', S: 'v19_shifts' };
+            // Multi-select state
+            const [isSelectMode, setIsSelectMode] = useState(false);
+            const [selectedDates, setSelectedDates] = useState(new Set());
+
+            const KEYS = { C: 'v20_cfg', S: 'v20_shifts' };
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
@@ -445,21 +512,47 @@
 
             const saveShift = (d, data) => setSettings(p => ({...p, shifts: {...p.shifts, [d]: data}}));
 
+            // Multi-select logic
+            const toggleDate = (iso) => {
+                const next = new Set(selectedDates);
+                if(next.has(iso)) next.delete(iso); else next.add(iso);
+                setSelectedDates(next);
+            };
+
+            const applyTemplateToSelection = (tpl) => {
+                if(selectedDates.size === 0) return;
+                const stats = calculateShiftStats(tpl);
+                const shiftData = {...tpl, ...stats, templateId: tpl.id};
+                setSettings(p => {
+                    const newShifts = {...p.shifts};
+                    selectedDates.forEach(d => newShifts[d] = shiftData);
+                    return {...p, shifts: newShifts};
+                });
+                setSelectedDates(new Set());
+                setIsSelectMode(false);
+            };
+
+            const clearSelection = () => { setSelectedDates(new Set()); setIsSelectMode(false); };
+
             return html`
                 <div className="max-w-md mx-auto p-4 relative">
                     <!-- Header -->
                     <div className="flex justify-between items-center mb-4">
                         <div className="flex items-center">
-                            <h1 className="text-xl font-bold text-gray-900 dark:text-white">Мой График</h1>
+                            <h1 className="text-xl font-bold text-gray-900 dark:text-white">${isSelectMode ? `Выбрано: ${selectedDates.size}` : "Мой График"}</h1>
                             <span className=${'sync-status ' + (sync === 'ok' ? 'sync-ok' : sync === 'fail' ? 'sync-fail' : 'sync-pending')}>${sync === 'ok' ? '☁️' : sync === 'fail' ? '⚠️' : '🔄'}</span>
                         </div>
                         <div className="flex gap-2">
                              <button onClick=${load} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition">
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth=${2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                             </button>
+                            <button onClick=${() => setIsSelectMode(!isSelectMode)} className=${'p-2 rounded-full transition ' + (isSelectMode ? 'bg-blue-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700')}>
+                                ${isSelectMode ? html`<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth=${2} d="M5 13l4 4L19 7" /></svg>` : html`<svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-600 dark:text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth=${2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>`}
+                            </button>
+                            ${!isSelectMode && html`
                             <button onClick=${() => setSett(true)} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition">
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-gray-600 dark:text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth=${2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth=${2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-                            </button>
+                            </button>`}
                         </div>
                     </div>
 
@@ -479,19 +572,69 @@
                             if(item.type === 'e') return html`<div key=${'e'+idx} className="aspect-square"></div>`;
                             const s = settings.shifts[item.iso];
                             const isTd = new Date().toDateString() === item.dt.toDateString();
+                            const isSelected = selectedDates.has(item.iso);
+                            
                             return html`
-                                <div key=${item.iso} onClick=${() => { setSelDate(item.iso); setModal(true); }}
-                                    className=${'aspect-square rounded-xl flex flex-col items-center justify-center cursor-pointer transition-all shadow-sm relative ' + (s ? ' text-white shadow-md ' : ' bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 ') + (isTd ? ' ring-2 ring-blue-400 ring-offset-1 dark:ring-offset-gray-900 ' : '')}
+                                <div key=${item.iso} onClick=${() => {
+                                    if(isSelectMode) toggleDate(item.iso);
+                                    else { setSelDate(item.iso); setModal(true); }
+                                }}
+                                    className=${'aspect-square rounded-xl flex flex-col items-center justify-center cursor-pointer transition-all shadow-sm relative ' + 
+                                        (s ? ' text-white shadow-md ' : ' bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 ') + 
+                                        (isTd ? ' ring-2 ring-blue-400 ring-offset-1 dark:ring-offset-gray-900 ' : '') +
+                                        (isSelected ? ' day-selected z-10 ' : '')}
                                     style=${{ backgroundColor: s ? s.color : null }}>
                                     <span className="font-bold text-sm">${item.dt.getDate()}</span>
                                     ${s && html`<span className="text-[10px] opacity-90">${s.totalHours}ч</span>`}
                                     ${s?.isHoliday && html`<div className="absolute top-0 left-0 w-2 h-2 bg-yellow-400 rounded-full"></div>`}
+                                    
+                                    ${isSelected && html`
+                                        <div className="absolute inset-0 bg-blue-500/30 flex items-center justify-center">
+                                            <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center text-white shadow-lg border-2 border-white">
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
+                                            </div>
+                                        </div>
+                                    `}
                                 </div>
                             `;
                         })}
                     </div>
 
+                    <!-- Multi-select Action Panel -->
+                    ${isSelectMode && html`
+                        <div className="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 border-t dark:border-gray-700 shadow-lg z-40 p-4 animate-slide-up">
+                            <div className="flex justify-between items-center mb-2">
+                                <span className="text-sm text-gray-500 dark:text-gray-400">Выберите смену:</span>
+                                <button onClick=${clearSelection} className="text-xs text-gray-400 hover:text-red-500">Отмена</button>
+                            </div>
+                            <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-2">
+                                ${settings.templates.map(tpl => html`
+                                    <button key=${tpl.id} onClick=${() => applyTemplateToSelection(tpl)}
+                                        className="flex-shrink-0 px-4 py-2 rounded-full text-white font-medium shadow-md hover:opacity-90 transition flex items-center gap-2"
+                                        style=${{ backgroundColor: tpl.color }}>
+                                        <div className="w-3 h-3 rounded-full bg-white/30"></div>
+                                        ${tpl.name}
+                                    </button>
+                                `)}
+                                ${selectedDates.size > 0 && html`
+                                     <button onClick=${() => {
+                                        setSettings(p => {
+                                            const newShifts = {...p.shifts};
+                                            selectedDates.forEach(d => delete newShifts[d]);
+                                            return {...p, shifts: newShifts};
+                                        });
+                                        clearSelection();
+                                     }}
+                                     className="flex-shrink-0 px-4 py-2 rounded-full bg-red-100 text-red-600 font-medium border border-red-200 dark:bg-red-900/50 dark:text-red-400 dark:border-red-800">
+                                        Удалить
+                                     </button>
+                                `}
+                            </div>
+                        </div>
+                    `}
+
                     <!-- Stats -->
+                    ${!isSelectMode && html`
                     <div className="mt-6 space-y-4">
                         <div className="grid grid-cols-3 gap-2 text-center">
                             <div className="bg-white dark:bg-gray-800 p-3 rounded-2xl shadow-sm"><div className="text-xl font-bold text-blue-500">${stats.h}</div><div className="text-[10px] text-gray-500">Часов</div></div>
@@ -509,6 +652,7 @@
                             ${stats.b > 0 && html`<div className="text-xs text-yellow-600 mt-1 text-right">(${stats.b} ч - праздничные)</div>`}
                         </div>
                     </div>
+                    `}
 
                     ${modal && html`<${ShiftModal} show=${modal} onClose=${() => setModal(false)} date=${selDate} shiftData=${settings.shifts[selDate]} onSave=${saveShift} templates=${settings.templates} />`}
                     ${sett && html`<${SettingsScreen} settings=${settings} setSettings=${setSettings} onClose=${() => setSett(false)} />`}
