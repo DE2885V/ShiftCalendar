@@ -32,21 +32,18 @@
         .sync-status { font-size: 10px; padding: 2px 6px; border-radius: 4px; margin-left: 8px; }
         .sync-ok { background: #d1fae5; color: #065f46; }
         .sync-fail { background: #fee2e2; color: #991b1b; }
+        .sync-pending { background: #fef3c7; color: #92400e; }
         
         input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.5); cursor: pointer; }
         .day-selected { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5); }
         
         .holiday-marker {
             position: absolute;
-            top: 0;
-            left: 0;
-            width: 0;
-            height: 0;
+            top: 0; left: 0; width: 0; height: 0;
             border-top: 20px solid #ef4444;
             border-right: 20px solid transparent;
         }
         
-        /* Fix for input widths */
         .input-time { min-width: 0; }
     </style>
 </head>
@@ -59,7 +56,7 @@
     </div>
 
     <script type="module">
-        import React, { useState, useEffect, useMemo } from 'https://esm.sh/react@18.2.0';
+        import React, { useState, useEffect, useMemo, useRef } from 'https://esm.sh/react@18.2.0';
         import ReactDOM from 'https://esm.sh/react-dom@18.2.0/client';
         import htm from 'https://esm.sh/htm';
         
@@ -78,45 +75,29 @@
         const getOverlap = (s1, e1, s2, e2) => Math.max(0, Math.min(e1, e2) - Math.max(s1, s2));
 
         const calculateShiftStats = (shift, holidaysMap, shiftDateStr) => {
-            // If no shift data or empty times -> no work
             if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, totalPay: 0, breakdown: {} };
 
             let sStart = timeToMins(shift.startTime);
             let sEnd = timeToMins(shift.endTime);
-            if (sEnd <= sStart) sEnd += 1440; // Handle overnight shifts (e.g. 20:00 - 08:00)
+            if (sEnd <= sStart) sEnd += 1440; 
 
             let lStart = timeToMins(shift.lunchStart);
             let lEnd = timeToMins(shift.lunchEnd);
-            if (lEnd <= lStart) lEnd += 1440; // Lunch crossing midnight? rare but possible
-            
-            // Align lunch to shift start
-            // If lunch (e.g. 00:00) is before shift start (e.g. 20:00 linear 1200), it's next day's lunch
-            // Need to move lunch to linear scale relative to sStart
-            // If lStart < sStart, it implies it belongs to the "next day" part if the shift crosses midnight
-            // But simply: if shift is 20:00(1200)->08:00(1920) and lunch is 00:00(0)->01:00(60)
-            // lStart (0) < sStart (1200). We need to push lunch to 1440+.
-            if (lStart < sStart) {
-                lStart += 1440;
-                lEnd += 1440;
-            }
-            // Edge case: Lunch 12:00-13:00. Shift 20:00-08:00. 
-            // lStart (720) < sStart (1200). Push to 2160? No, lunch is not inside shift. Overlap will be 0. Correct.
+            if (lEnd <= lStart) lEnd += 1440;
+            if (lStart < sStart) { lStart += 1440; lEnd += 1440; }
 
             const nStart = timeToMins(shift.nightStart || '22:00');
             const nEnd = timeToMins(shift.nightEnd || '06:00');
             const rate = Number(shift.rate) || 0;
             const nightBonus = (Number(shift.nightBonusPercent) || 0) / 100;
 
-            // Determine Dates
             const anchorDate = new Date(shiftDateStr);
-            const nextDate = new Date(shiftDateStr);
-            nextDate.setDate(nextDate.getDate() + 1);
+            const nextDate = new Date(shiftDateStr); nextDate.setDate(nextDate.getDate() + 1);
             const nextDateStr = getISODate(nextDate);
 
             const isAnchorHoliday = holidaysMap[shiftDateStr] || false;
             const isNextHoliday = holidaysMap[nextDateStr] || false;
 
-            // Split Shift into Segments (Anchor part and Next day part)
             const segments = [];
             if (sEnd > 1440) {
                 segments.push({ start: sStart, end: 1440, isHoliday: isAnchorHoliday });
@@ -125,89 +106,35 @@
                 segments.push({ start: sStart, end: sEnd, isHoliday: isAnchorHoliday });
             }
 
-            let totalMins = 0;
-            let totalPay = 0;
-            
+            let totalMins = 0; let totalPay = 0;
             let dayMins = 0; let nightMins = 0; let holidayMins = 0;
             let dayPay = 0; let nightPay = 0; let holidayPay = 0;
 
             segments.forEach(seg => {
-                // 1. Calculate Work Duration in Segment
-                // Raw duration minus lunch overlap in this segment
                 const segLunch = getOverlap(seg.start, seg.end, lStart, lEnd);
                 const segDur = (seg.end - seg.start) - segLunch;
                 if (segDur <= 0) return;
                 totalMins += segDur;
 
-                // 2. Calculate Night Minutes in Segment
-                // Night is defined by hours. 
-                // If Night wraps (22-06), it is [nStart, 1440] and [0, nEnd].
-                // On linear scale starting from sStart:
-                // Anchor Segment [sStart, 1440]: Night part is [nStart, 1440]
-                // Next Segment [1440, sEnd]: Night part is [1440, 1440+nEnd] (because 00:00 is 1440 linear)
-                
                 let rawNightMins = 0;
-                
                 if (seg.start >= 1440) {
-                    // This is the "Next Day" segment (linear time > 1440)
-                    // Night here corresponds to 00:00 - nEnd of the next day.
-                    // On linear scale: [1440, 1440 + nEnd]
                     rawNightMins = getOverlap(seg.start, seg.end, 1440, 1440 + nEnd);
                 } else {
-                    // This is the "Anchor Day" segment
-                    // Night here corresponds to nStart - 24:00 of the anchor day.
-                    // On linear scale: [nStart, 1440]
-                    // ALSO check if Night starts early (e.g. 00:00-06:00) on anchor day?
-                    // Standard assumption: Night definition is fixed hours.
-                    // If shift is 08:00-20:00. Night 22-06.
-                    // Anchor segment [480, 1200]. Overlap with [1320, 1440] is 0. Correct.
-                    // If shift is 20:00-08:00.
-                    // Anchor segment [1200, 1440]. Overlap with [1320, 1440] is 120 (2h). Correct.
-                    
                     rawNightMins = getOverlap(seg.start, seg.end, nStart, 1440);
-                    
-                    // Also check if night wraps into morning of Anchor day (00:00 - nEnd)
-                    // Only if shift is entirely within 0 - nEnd? No, linear logic handles this.
-                    // If shift 05:00-10:00. sStart=300, sEnd=600.
-                    // seg [300, 600]. 
-                    // Overlap with [nStart(1320), 1440] is 0.
-                    // We missed the [0, nEnd(360)] part!
-                    
-                    // CORRECTION for Anchor Segment:
-                    // It can contain BOTH the tail of previous night [0, nEnd] AND head of current night [nStart, 1440]
-                    // IF sStart < nEnd (shift starts in early morning)
-                    if (seg.start < nEnd) {
-                         rawNightMins += getOverlap(seg.start, seg.end, 0, nEnd);
-                    }
+                    if (seg.start < nEnd) rawNightMins += getOverlap(seg.start, seg.end, 0, nEnd);
                 }
                 
-                // 3. Subtract Lunch from Night
-                // We need to subtract the part of lunch that fell into night hours within this segment
-                const lunchInNight = getOverlap(lStart, lEnd, nStart, 1440) + getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
-                // Note: lunchInNight calculation above was global. Need to make it segment-local or just subtract lunch overlap.
-                // Simpler: RawNight includes Lunch. We want NetNight.
-                // NetNight = RawNight - (Lunch ∩ Night).
-                // We calculated segLunch (Lunch ∩ Segment).
-                // We need (Lunch ∩ Night ∩ Segment).
-                // Since lStart/lEnd are linear, and we know Night intervals, we can calc overlap directly.
-                
                 let segLunchInNight = 0;
-                // Check overlap of Lunch [lStart, lEnd] with Night intervals inside this segment
                 if (seg.start >= 1440) {
-                    // Next Day Segment
                     segLunchInNight = getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
                 } else {
-                    // Anchor Segment
                     segLunchInNight = getOverlap(lStart, lEnd, nStart, 1440);
-                    if (seg.start < nEnd) {
-                         segLunchInNight += getOverlap(lStart, lEnd, 0, nEnd);
-                    }
+                    if (seg.start < nEnd) segLunchInNight += getOverlap(lStart, lEnd, 0, nEnd);
                 }
                 
                 const segNight = Math.max(0, rawNightMins - segLunchInNight);
                 const segDay = segDur - segNight;
 
-                // 4. Calculate Pay
                 const mult = seg.isHoliday ? 2 : 1;
                 const baseNightPay = (segNight / 60) * rate * mult * (1 + nightBonus);
                 const baseDayPay = (segDay / 60) * rate * mult;
@@ -215,40 +142,26 @@
                 totalPay += baseDayPay + baseNightPay;
 
                 if (seg.isHoliday) {
-                    holidayMins += segDur;
-                    holidayPay += baseDayPay + baseNightPay;
+                    holidayMins += segDur; holidayPay += baseDayPay + baseNightPay;
                 } else {
-                    dayMins += segDay;
-                    dayPay += baseDayPay;
-                    nightMins += segNight;
-                    nightPay += baseNightPay;
+                    dayMins += segDay; dayPay += baseDayPay;
+                    nightMins += segNight; nightPay += baseNightPay;
                 }
             });
 
             return {
                 totalHours: (totalMins / 60).toFixed(1),
                 totalPay: Math.round(totalPay),
-                breakdown: {
-                    dayMins, nightMins, holidayMins,
-                    dayPay: Math.round(dayPay),
-                    nightPay: Math.round(nightPay),
-                    holidayPay: Math.round(holidayPay)
-                }
+                breakdown: { dayMins, nightMins, holidayMins, dayPay: Math.round(dayPay), nightPay: Math.round(nightPay), holidayPay: Math.round(holidayPay) }
             };
         };
 
         // --- Components ---
         
         const ShiftModal = ({ show, onClose, date, shiftData, paymentData, bonusData, isHoliday, onSave, onDelete, templates }) => {
-            // Default empty form: Times are EMPTY to allow saving just "Holiday"
             const getEmptyForm = () => ({
-                startTime: '', endTime: '',
-                lunchStart: '', lunchEnd: '',
-                rate: 525,
-                nightStart: '22:00', nightEnd: '06:00',
-                nightBonusPercent: 40,
-                color: '#3b82f6',
-                note: ''
+                startTime: '', endTime: '', lunchStart: '', lunchEnd: '',
+                rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6', note: ''
             });
 
             const [form, setForm] = useState(getEmptyForm());
@@ -258,8 +171,7 @@
 
             useEffect(() => {
                 if (show) {
-                    if (shiftData) setForm(shiftData);
-                    else setForm(getEmptyForm()); // Empty form for new entries
+                    if (shiftData) setForm(shiftData); else setForm(getEmptyForm());
                     setPayment(paymentData || 0);
                     setBonus(bonusData || 0);
                     setHoliday(isHoliday || false);
@@ -272,40 +184,28 @@
             
             const applyTemplate = (tpl) => {
                 setForm(prev => ({
-                    ...prev,
-                    templateId: tpl.id,
+                    ...prev, templateId: tpl.id,
                     startTime: tpl.startTime, endTime: tpl.endTime,
                     lunchStart: tpl.lunchStart, lunchEnd: tpl.lunchEnd,
-                    rate: tpl.rate,
-                    nightStart: tpl.nightStart, nightEnd: tpl.nightEnd,
-                    nightBonusPercent: tpl.nightBonusPercent,
-                    color: tpl.color,
-                    note: tpl.name
+                    rate: tpl.rate, nightStart: tpl.nightStart, nightEnd: tpl.nightEnd,
+                    nightBonusPercent: tpl.nightBonusPercent, color: tpl.color, note: tpl.name
                 }));
             };
 
             const holidaysMap = { [date]: holiday };
-            // Calculate stats. If no times, stats are zero.
             const stats = calculateShiftStats(form, holidaysMap, date);
             const hasShift = !!shiftData;
-            
             const bd = stats.breakdown;
 
             const handleSave = () => { 
-                // Determine if we should save shift
-                // If startTime and endTime are present -> Save Shift
-                // If startTime or endTime are missing -> Delete Shift (save null)
                 const shiftPayload = (form.startTime && form.endTime) ? form : null;
-                
                 onSave(date, shiftPayload, payment ? Number(payment) : null, bonus ? Number(bonus) : null, holiday); 
                 onClose(); 
             };
             
             const handleDelete = () => {
                 if(confirm("Удалить смену? День останется праздничным, если отмечено.")) {
-                    onDelete(date);
-                    // Don't close, let user see the change or close manually? Close is better.
-                    onClose();
+                    onDelete(date); onClose();
                 }
             };
 
@@ -320,7 +220,6 @@
                         </div>
                         
                         <div className="space-y-4">
-                            
                             <!-- TOP SECTION: STATS -->
                             <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-xl border border-green-200 dark:border-green-700">
                                 <div className="flex justify-between items-center mb-2">
@@ -332,7 +231,6 @@
                                     </div>
                                     <div className="text-3xl font-bold text-green-600 dark:text-green-400">${stats.totalPay.toLocaleString()} ₽</div>
                                 </div>
-                                
                                 ${stats.totalHours > 0 && html`
                                     <div className="bg-gray-100 dark:bg-gray-700/30 p-2 rounded-lg text-xs space-y-1 mt-2">
                                         <div class="flex justify-between"><span>Рабочее время:</span><span>${stats.totalHours} ч</span></div>
@@ -344,8 +242,6 @@
                             </div>
 
                             <!-- MIDDLE SECTION: SHIFT FORM -->
-                            
-                            <!-- Templates -->
                             <div className="flex flex-wrap gap-2">
                                 ${templates.map(tpl => html`
                                     <button key=${tpl.id} onClick=${() => applyTemplate(tpl)}
@@ -354,7 +250,6 @@
                                 `)}
                             </div>
 
-                            <!-- Time -->
                             <div className="bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl">
                                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Время</span>
                                 <div className="grid grid-cols-2 gap-2">
@@ -363,7 +258,6 @@
                                 </div>
                             </div>
                             
-                            <!-- Lunch & Rate -->
                             <div className="grid grid-cols-2 gap-2">
                                 <div className="bg-gray-50 dark:bg-gray-700/50 p-2 rounded-xl">
                                     <label className="text-xs text-gray-500 block mb-1">Обед (нач-кон)</label>
@@ -378,7 +272,6 @@
                                 </div>
                             </div>
                             
-                            <!-- Night (Collapsible) -->
                             <details className="bg-indigo-50 dark:bg-indigo-900/20 p-3 rounded-xl border border-indigo-100 dark:border-indigo-800">
                                 <summary className="text-sm font-medium text-indigo-700 dark:text-indigo-300 cursor-pointer">Ночные настройки</summary>
                                 <div className="grid grid-cols-3 gap-2 items-end mt-2">
@@ -388,7 +281,6 @@
                                 </div>
                             </details>
 
-                            <!-- FINANCES -->
                             <div className="grid grid-cols-2 gap-2">
                                 <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-xl border border-yellow-200 dark:border-yellow-800">
                                     <label className="text-xs font-medium text-yellow-700 dark:text-yellow-300">Премия</label>
@@ -406,9 +298,7 @@
                                 </div>
                             </div>
 
-                            <!-- BOTTOM SECTION: HOLIDAY & ACTIONS -->
-                            
-                            <!-- Holiday Toggle -->
+                            <!-- BOTTOM SECTION -->
                             <label className="flex items-center justify-between p-3 bg-red-50 dark:bg-red-900/20 rounded-xl cursor-pointer border border-red-200 dark:border-red-700 mt-2">
                                 <div className="flex flex-col">
                                     <span className="font-medium text-red-700 dark:text-red-300">Праздничный день</span>
@@ -491,7 +381,6 @@
                                     <div><label className="text-xs text-gray-400">Обед (с)</label><input type="time" value=${form.lunchStart} onChange=${(e) => setForm(p => ({...p, lunchStart: e.target.value}))} className="w-full p-2 bg-gray-100 dark:bg-gray-700 dark:text-white rounded-lg"/></div>
                                     <div><label className="text-xs text-gray-400">Обед (по)</label><input type="time" value=${form.lunchEnd} onChange=${(e) => setForm(p => ({...p, lunchEnd: e.target.value}))} className="w-full p-2 bg-gray-100 dark:bg-gray-700 dark:text-white rounded-lg"/></div>
                                 </div>
-
                                 <div className="flex gap-2">
                                     <div className="flex-1"><label className="text-xs text-gray-400">Ставка</label><input type="number" value=${form.rate} onChange=${(e) => setForm(p => ({...p, rate: e.target.value}))} className="w-full p-2 bg-gray-100 dark:bg-gray-700 dark:text-white rounded-lg"/></div>
                                     <div className="flex-1"><label className="text-xs text-gray-400">Цвет</label><input type="color" value=${form.color} onChange=${(e) => setForm(p => ({...p, color: e.target.value}))} className="w-full h-10 rounded-lg cursor-pointer bg-transparent"/></div>
@@ -537,10 +426,7 @@
         const App = () => {
             const [init, setInit] = useState(false);
             const [settings, setSettings] = useState({
-                shifts: {}, 
-                payments: {},
-                bonuses: {},
-                holidays: {},
+                shifts: {}, payments: {}, bonuses: {}, holidays: {},
                 templates: [
                     { id: 1, name: "День", startTime: '08:00', endTime: '20:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' },
                     { id: 2, name: "Ночь", startTime: '20:00', endTime: '08:00', lunchStart: '00:00', lunchEnd: '01:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#8b5cf6' }
@@ -548,7 +434,7 @@
                 startDay: 1, theme: 'light', tax: 13
             });
             
-            const [sync, setSync] = useState('pending');
+            const [syncStatus, setSyncStatus] = useState('pending');
             const [selDate, setSelDate] = useState(null);
             const [modal, setModal] = useState(false);
             const [sett, setSett] = useState(false);
@@ -557,50 +443,83 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            const KEYS = { CFG: 'v29_cfg', DATA: 'v29_data' };
+            // Save/Load Logic with Safety
+            const KEYS = { CFG: 'v30_cfg', DATA: 'v30_data' };
             const tg = window.Telegram?.WebApp;
             
+            // Debounce ref for saving
+            const saveTimeoutRef = useRef(null);
+
+            const parseJsonSafe = (str) => { try { return str ? JSON.parse(str) : null; } catch { return null; } };
+
             const load = () => {
-                setSync('pending');
-                const done = (c, d) => {
-                    try {
-                        const cfg = c ? JSON.parse(c) : {};
-                        const data = d ? JSON.parse(d) : {};
-                        setSettings(p => ({
-                            ...p, 
-                            ...cfg,
-                            shifts: data.shifts || {},
-                            payments: data.payments || {},
-                            bonuses: data.bonuses || {},
-                            holidays: data.holidays || {}
-                        }));
-                        setSync('ok');
-                    } catch(e) { console.error(e); setSync('fail'); }
-                    setInit(true);
-                };
+                setSyncStatus('pending');
                 
+                // Helper to apply data
+                const applyData = (cfgRaw, dataRaw) => {
+                    const cfg = cfgRaw ? parseJsonSafe(cfgRaw) : null;
+                    const data = dataRaw ? parseJsonSafe(dataRaw) : null;
+                    
+                    setSettings(p => {
+                        // If cloud returned nothing, we might want to keep existing if we are just refreshing
+                        // But for initial load, if cloud is empty, use defaults (or local backup checked inside parseJsonSafe if we modify it)
+                        // Better approach: 
+                        const merged = {
+                            ...p,
+                            ...(cfg || {}),
+                            shifts: (data || {}).shifts || {},
+                            payments: (data || {}).payments || {},
+                            bonuses: (data || {}).bonuses || {},
+                            holidays: (data || {}).holidays || {}
+                        };
+                        return merged;
+                    });
+                    setSyncStatus('ok'); setInit(true);
+                };
+
                 if(tg?.CloudStorage) {
                     tg.CloudStorage.getItems([KEYS.CFG, KEYS.DATA], (e, r) => {
-                        if(e) { setSync('fail'); setInit(true); return; }
-                        done(r[KEYS.CFG], r[KEYS.DATA]);
+                        if(e) { setSyncStatus('fail'); setInit(true); console.error("Cloud load error", e); return; }
+                        
+                        let cfg = r[KEYS.CFG];
+                        let data = r[KEYS.DATA];
+
+                        // SAFETY FIX: If cloud is empty, fallback to local storage to prevent data wipe on race condition
+                        if (!cfg) cfg = localStorage.getItem(KEYS.CFG);
+                        if (!data) data = localStorage.getItem(KEYS.DATA);
+
+                        applyData(cfg, data);
                     });
                 } else {
-                    done(localStorage.getItem(KEYS.CFG), localStorage.getItem(KEYS.DATA));
+                    applyData(localStorage.getItem(KEYS.CFG), localStorage.getItem(KEYS.DATA));
                 }
             };
 
             const save = (s) => {
-                try {
-                    const {shifts, payments, bonuses, holidays, ...cfg} = s;
-                    const cfgStr = JSON.stringify(cfg);
-                    const dataStr = JSON.stringify({shifts, payments, bonuses, holidays});
-                    localStorage.setItem(KEYS.CFG, cfgStr);
-                    localStorage.setItem(KEYS.DATA, dataStr);
-                    if(tg?.CloudStorage) {
-                        tg.CloudStorage.setItem(KEYS.CFG, cfgStr);
-                        tg.CloudStorage.setItem(KEYS.DATA, dataStr);
-                    }
-                } catch(e) { console.error("Save error", e); }
+                const {shifts, payments, bonuses, holidays, ...cfg} = s;
+                const cfgStr = JSON.stringify(cfg);
+                const dataStr = JSON.stringify({shifts, payments, bonuses, holidays});
+
+                // 1. Save to LocalStorage IMMEDIATELY (Synchronous backup)
+                localStorage.setItem(KEYS.CFG, cfgStr);
+                localStorage.setItem(KEYS.DATA, dataStr);
+
+                // 2. Save to Cloud with DEBOUNCE
+                if(tg?.CloudStorage) {
+                    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+                    
+                    setSyncStatus('pending'); // Show saving status
+                    
+                    saveTimeoutRef.current = setTimeout(() => {
+                        tg.CloudStorage.setItem(KEYS.CFG, cfgStr, (err) => { if(err) console.error(err); });
+                        tg.CloudStorage.setItem(KEYS.DATA, dataStr, (err) => { 
+                            if(err) setSyncStatus('fail'); 
+                            else setSyncStatus('ok');
+                        });
+                    }, 1000); // Wait 1 sec before writing to cloud
+                } else {
+                    setSyncStatus('ok');
+                }
             };
 
             useEffect(() => { if(tg) { tg.ready(); tg.expand(); } load(); 
@@ -625,7 +544,7 @@
                 for(let i=0; i<off; i++) d.push({type:'e'});
                 while(c <= pEnd) {
                     const iso = getISODate(c);
-                    d.push({type:'d', dt: new Date(c), iso: iso });
+                    d.push({type:'d', dt: new Date(c), iso });
                     c.setDate(c.getDate()+1);
                 }
                 return d;
@@ -640,16 +559,11 @@
                     if(x.type === 'd') {
                         if(settings.shifts[x.iso]) {
                             const s = calculateShiftStats(settings.shifts[x.iso], settings.holidays, x.iso);
-                            h += parseFloat(s.totalHours) || 0;
-                            gross += s.totalPay || 0;
-                            c++;
+                            h += parseFloat(s.totalHours) || 0; gross += s.totalPay || 0; c++;
                             if(x.iso < td) ps++;
-                            
                             const bd = s.breakdown;
-                            nightH += bd.nightMins / 60;
-                            nightPay += bd.nightPay;
-                            holidayH += bd.holidayMins / 60;
-                            holidayPay += bd.holidayPay;
+                            nightH += bd.nightMins / 60; nightPay += bd.nightPay;
+                            holidayH += bd.holidayMins / 60; holidayPay += bd.holidayPay;
                         }
                         if(settings.payments[x.iso]) adv += Number(settings.payments[x.iso]) || 0;
                         if(settings.bonuses[x.iso]) bon += Number(settings.bonuses[x.iso]) || 0;
@@ -661,27 +575,16 @@
                 const net = totalGross - tx;
                 const remaining = net - adv;
                 
-                return { 
-                    h: h.toFixed(1), gross, c, ps, adv, bon, tx, net, remaining,
-                    nightH: nightH.toFixed(1), nightPay,
-                    holidayH: holidayH.toFixed(1), holidayPay
-                };
+                return { h: h.toFixed(1), gross, c, ps, adv, bon, tx, net, remaining, nightH: nightH.toFixed(1), nightPay, holidayH: holidayH.toFixed(1), holidayPay };
             }, [days, settings.shifts, settings.payments, settings.bonuses, settings.holidays, settings.tax]);
 
             const saveShift = (d, sData, pAmount, bAmount, isHol) => {
                 setSettings(p => {
                     const ns = {...p.shifts}, np = {...p.payments}, nb = {...p.bonuses}, nh = {...p.holidays};
-                    
-                    // Shift logic: if sData is provided (has times), save it. Else delete.
-                    if (sData && sData.startTime && sData.endTime) ns[d] = sData;
-                    else delete ns[d];
-                    
+                    if (sData && sData.startTime && sData.endTime) ns[d] = sData; else delete ns[d];
                     if (pAmount) np[d] = pAmount; else delete np[d];
                     if (bAmount) nb[d] = bAmount; else delete nb[d];
-                    
-                    // Holiday logic: independent
                     if (isHol) nh[d] = true; else delete nh[d];
-
                     return {...p, shifts: ns, payments: np, bonuses: nb, holidays: nh};
                 });
             };
@@ -719,10 +622,12 @@
                     <div className="flex justify-between items-center mb-4">
                         <div className="flex items-center">
                             <h1 className="text-xl font-bold text-gray-900 dark:text-white">${isSelectMode ? `Выбрано: ${selectedDates.size}` : "Мой График"}</h1>
-                            <span className=${'sync-status ' + (sync === 'ok' ? 'sync-ok' : sync === 'fail' ? 'sync-fail' : 'sync-pending')}>${sync === 'ok' ? '☁️' : sync === 'fail' ? '⚠️' : '🔄'}</span>
+                            <span className=${'sync-status ' + (syncStatus === 'ok' ? 'sync-ok' : syncStatus === 'fail' ? 'sync-fail' : 'sync-pending')}>
+                                ${syncStatus === 'ok' ? '☁️' : syncStatus === 'fail' ? '⚠️' : '🔄'}
+                            </span>
                         </div>
                         <div className="flex gap-2">
-                             <button onClick=${load} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition">
+                             <button onClick=${load} disabled=${syncStatus === 'pending'} className=${"p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition " + (syncStatus === 'pending' ? 'opacity-50' : '')}>
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth=${2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                             </button>
                             <button onClick=${() => setIsSelectMode(!isSelectMode)} className=${'p-2 rounded-full transition ' + (isSelectMode ? 'bg-blue-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700')}>
@@ -749,50 +654,25 @@
                         ${days.map((item, idx) => {
                             if(item.type === 'e') return html`<div key=${'e'+idx} className="aspect-square"></div>`;
                             const s = settings.shifts[item.iso];
-                            const p = settings.payments[item.iso];
-                            const b = settings.bonuses[item.iso];
+                            const p = settings.payments[item.iso]; const b = settings.bonuses[item.iso];
                             const hol = settings.holidays[item.iso];
                             const isTd = getISODate(new Date()) === item.iso;
                             const isSelected = selectedDates.has(item.iso);
-                            
                             const dayStats = s ? calculateShiftStats(s, settings.holidays, item.iso) : null;
                             
                             return html`
-                                <div key=${item.iso} onClick=${() => {
-                                    if(isSelectMode) toggleDate(item.iso);
-                                    else { setSelDate(item.iso); setModal(true); }
-                                }}
+                                <div key=${item.iso} onClick=${() => { if(isSelectMode) toggleDate(item.iso); else { setSelDate(item.iso); setModal(true); } }}
                                     className=${'aspect-square rounded-xl flex flex-col items-center justify-center cursor-pointer transition-all shadow-sm relative ' + 
                                         (s ? ' text-white shadow-md ' : ' bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 ') + 
                                         (isTd ? ' ring-2 ring-blue-400 ring-offset-1 dark:ring-offset-gray-900 ' : '') +
                                         (isSelected ? ' day-selected z-10 ' : '')}
                                     style=${{ backgroundColor: s ? s.color : null }}>
-                                    
-                                    <!-- Holiday Marker -->
                                     ${hol && html`<div className="holiday-marker"></div>`}
-                                    
-                                    <!-- Payment Marker -->
                                     ${p && html`<div className="absolute top-0 right-0 w-2 h-2 bg-green-500 rounded-bl-full"></div>`}
-                                    
-                                    <!-- Bonus Marker -->
                                     ${b && html`<div className="absolute bottom-0 right-0 w-2 h-2 bg-yellow-500 rounded-tl-full flex items-center justify-center"><span class="text-[6px] text-white">★</span></div>`}
-                                    
                                     <span className="font-bold text-sm">${item.dt.getDate()}</span>
-                                    ${dayStats && html`
-                                        <div className="text-[8px] opacity-80 leading-tight text-center">
-                                            <span>${dayStats.totalHours}ч</span>
-                                            <br/>
-                                            <span class="font-bold">${dayStats.totalPay}₽</span>
-                                        </div>
-                                    `}
-                                    
-                                    ${isSelected && html`
-                                        <div className="absolute inset-0 bg-blue-500/30 flex items-center justify-center">
-                                            <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center text-white shadow-lg border-2 border-white">
-                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
-                                            </div>
-                                        </div>
-                                    `}
+                                    ${dayStats && html`<div className="text-[8px] opacity-80 leading-tight text-center"><span>${dayStats.totalHours}ч</span><br/><span class="font-bold">${dayStats.totalPay}₽</span></div>`}
+                                    ${isSelected && html`<div className="absolute inset-0 bg-blue-500/30 flex items-center justify-center"><div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center text-white shadow-lg border-2 border-white"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg></div></div>`}
                                 </div>
                             `;
                         })}
@@ -807,25 +687,13 @@
                             </div>
                             <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-2">
                                 ${settings.templates.map(tpl => html`
-                                    <button key=${tpl.id} onClick=${() => applyTemplateToSelection(tpl)}
-                                        className="flex-shrink-0 px-4 py-2 rounded-full text-white font-medium shadow-md hover:opacity-90 transition flex items-center gap-2"
-                                        style=${{ backgroundColor: tpl.color }}>
-                                        <div className="w-3 h-3 rounded-full bg-white/30"></div>
-                                        ${tpl.name}
+                                    <button key=${tpl.id} onClick=${() => applyTemplateToSelection(tpl)} className="flex-shrink-0 px-4 py-2 rounded-full text-white font-medium shadow-md hover:opacity-90 transition flex items-center gap-2" style=${{ backgroundColor: tpl.color }}>
+                                        <div className="w-3 h-3 rounded-full bg-white/30"></div>${tpl.name}
                                     </button>
                                 `)}
                                 ${selectedDates.size > 0 && html`
-                                     <button onClick=${() => {
-                                        setSettings(p => {
-                                            const ns = {...p.shifts}, np = {...p.payments}, nb = {...p.bonuses};
-                                            selectedDates.forEach(d => { delete ns[d]; delete np[d]; delete nb[d]; });
-                                            return {...p, shifts: ns, payments: np, bonuses: nb};
-                                        });
-                                        clearSelection();
-                                     }}
-                                     className="flex-shrink-0 px-4 py-2 rounded-full bg-red-100 text-red-600 font-medium border border-red-200 dark:bg-red-900/50 dark:text-red-400 dark:border-red-800">
-                                        Удалить
-                                     </button>
+                                     <button onClick=${() => { setSettings(p => { const ns = {...p.shifts}, np = {...p.payments}, nb = {...p.bonuses}; selectedDates.forEach(d => { delete ns[d]; delete np[d]; delete nb[d]; }); return {...p, shifts: ns, payments: np, bonuses: nb}; }); clearSelection(); }}
+                                     className="flex-shrink-0 px-4 py-2 rounded-full bg-red-100 text-red-600 font-medium border border-red-200 dark:bg-red-900/50 dark:text-red-400 dark:border-red-800">Удалить</button>
                                 `}
                             </div>
                         </div>
@@ -840,31 +708,9 @@
                             <div className="bg-white dark:bg-gray-800 p-3 rounded-2xl shadow-sm border border-green-200"><div className="text-xl font-bold text-green-500">${stats.ps}</div><div className="text-[10px] text-gray-500">Прошло</div></div>
                         </div>
 
-                        <!-- Detailed Breakdown -->
                         <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm space-y-3">
-                            
-                            ${stats.holidayH > 0 && html`
-                                <div className="flex justify-between items-center text-sm border-b dark:border-gray-700 pb-2">
-                                    <div class="flex items-center gap-2">
-                                        <span class="w-2 h-2 rounded-full bg-red-500"></span>
-                                        <span className="text-gray-600 dark:text-gray-300">Праздничные</span>
-                                        <span className="text-xs text-gray-400">(${stats.holidayH}ч)</span>
-                                    </div>
-                                    <span className="font-bold text-red-500">${stats.holidayPay.toLocaleString()} ₽</span>
-                                </div>
-                            `}
-
-                            ${stats.nightH > 0 && html`
-                                <div className="flex justify-between items-center text-sm border-b dark:border-gray-700 pb-2">
-                                    <div class="flex items-center gap-2">
-                                        <span class="w-2 h-2 rounded-full bg-indigo-500"></span>
-                                        <span className="text-gray-600 dark:text-gray-300">Ночные</span>
-                                        <span className="text-xs text-gray-400">(${stats.nightH}ч)</span>
-                                    </div>
-                                    <span className="font-bold text-indigo-500">${stats.nightPay.toLocaleString()} ₽</span>
-                                </div>
-                            `}
-
+                            ${stats.holidayH > 0 && html`<div className="flex justify-between items-center text-sm border-b dark:border-gray-700 pb-2"><div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-red-500"></span><span className="text-gray-600 dark:text-gray-300">Праздничные</span><span className="text-xs text-gray-400">(${stats.holidayH}ч)</span></div><span className="font-bold text-red-500">${stats.holidayPay.toLocaleString()} ₽</span></div>`}
+                            ${stats.nightH > 0 && html`<div className="flex justify-between items-center text-sm border-b dark:border-gray-700 pb-2"><div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-indigo-500"></span><span className="text-gray-600 dark:text-gray-300">Ночные</span><span className="text-xs text-gray-400">(${stats.nightH}ч)</span></div><span className="font-bold text-indigo-500">${stats.nightPay.toLocaleString()} ₽</span></div>`}
                             <div className="flex justify-between mb-1 text-sm"><span className="text-gray-500">Начислено (ЗП)</span><span className="font-bold">${stats.gross.toLocaleString()} ₽</span></div>
                             ${stats.bon > 0 && html`<div className="flex justify-between text-sm text-gray-400"><span>Премии</span><span className="text-yellow-500">+ ${stats.bon.toLocaleString()} ₽</span></div>`}
                             <div className="flex justify-between text-sm text-gray-400"><span>Налог (${settings.tax}%)</span><span class="text-red-400">- ${stats.tx.toLocaleString()} ₽</span></div>
