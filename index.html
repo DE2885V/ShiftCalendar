@@ -45,6 +45,9 @@
             border-top: 20px solid #ef4444;
             border-right: 20px solid transparent;
         }
+        
+        /* Fix for input widths */
+        .input-time { min-width: 0; }
     </style>
 </head>
 <body>
@@ -70,27 +73,41 @@
             return `${y}-${m}-${d}`;
         };
 
-        // --- Calculator Engine v4 (Detailed Stats) ---
+        // --- Calculator Engine v5 (Correct Segment Logic) ---
         const timeToMins = (t) => { if(!t) return 0; const [h, m] = t.split(':').map(Number); return h * 60 + m; };
         const getOverlap = (s1, e1, s2, e2) => Math.max(0, Math.min(e1, e2) - Math.max(s1, s2));
 
         const calculateShiftStats = (shift, holidaysMap, shiftDateStr) => {
+            // If no shift data or empty times -> no work
             if (!shift || !shift.startTime || !shift.endTime) return { totalHours: 0, totalPay: 0, breakdown: {} };
 
             let sStart = timeToMins(shift.startTime);
             let sEnd = timeToMins(shift.endTime);
-            if (sEnd < sStart) sEnd += 1440;
+            if (sEnd <= sStart) sEnd += 1440; // Handle overnight shifts (e.g. 20:00 - 08:00)
 
             let lStart = timeToMins(shift.lunchStart);
             let lEnd = timeToMins(shift.lunchEnd);
-            if (lEnd < lStart) lEnd += 1440;
-            if (lStart < sStart) { lStart += 1440; lEnd += 1440; }
+            if (lEnd <= lStart) lEnd += 1440; // Lunch crossing midnight? rare but possible
+            
+            // Align lunch to shift start
+            // If lunch (e.g. 00:00) is before shift start (e.g. 20:00 linear 1200), it's next day's lunch
+            // Need to move lunch to linear scale relative to sStart
+            // If lStart < sStart, it implies it belongs to the "next day" part if the shift crosses midnight
+            // But simply: if shift is 20:00(1200)->08:00(1920) and lunch is 00:00(0)->01:00(60)
+            // lStart (0) < sStart (1200). We need to push lunch to 1440+.
+            if (lStart < sStart) {
+                lStart += 1440;
+                lEnd += 1440;
+            }
+            // Edge case: Lunch 12:00-13:00. Shift 20:00-08:00. 
+            // lStart (720) < sStart (1200). Push to 2160? No, lunch is not inside shift. Overlap will be 0. Correct.
 
             const nStart = timeToMins(shift.nightStart || '22:00');
             const nEnd = timeToMins(shift.nightEnd || '06:00');
             const rate = Number(shift.rate) || 0;
             const nightBonus = (Number(shift.nightBonusPercent) || 0) / 100;
 
+            // Determine Dates
             const anchorDate = new Date(shiftDateStr);
             const nextDate = new Date(shiftDateStr);
             nextDate.setDate(nextDate.getDate() + 1);
@@ -99,6 +116,7 @@
             const isAnchorHoliday = holidaysMap[shiftDateStr] || false;
             const isNextHoliday = holidaysMap[nextDateStr] || false;
 
+            // Split Shift into Segments (Anchor part and Next day part)
             const segments = [];
             if (sEnd > 1440) {
                 segments.push({ start: sStart, end: 1440, isHoliday: isAnchorHoliday });
@@ -114,22 +132,82 @@
             let dayPay = 0; let nightPay = 0; let holidayPay = 0;
 
             segments.forEach(seg => {
-                const segDur = (seg.end - seg.start) - getOverlap(seg.start, seg.end, lStart, lEnd);
+                // 1. Calculate Work Duration in Segment
+                // Raw duration minus lunch overlap in this segment
+                const segLunch = getOverlap(seg.start, seg.end, lStart, lEnd);
+                const segDur = (seg.end - seg.start) - segLunch;
                 if (segDur <= 0) return;
                 totalMins += segDur;
 
-                let segNight = 0;
-                if (nStart > nEnd) {
-                    segNight += getOverlap(seg.start, seg.end, nStart, 1440);
-                    segNight += getOverlap(seg.start, seg.end, 1440, 1440 + nEnd);
+                // 2. Calculate Night Minutes in Segment
+                // Night is defined by hours. 
+                // If Night wraps (22-06), it is [nStart, 1440] and [0, nEnd].
+                // On linear scale starting from sStart:
+                // Anchor Segment [sStart, 1440]: Night part is [nStart, 1440]
+                // Next Segment [1440, sEnd]: Night part is [1440, 1440+nEnd] (because 00:00 is 1440 linear)
+                
+                let rawNightMins = 0;
+                
+                if (seg.start >= 1440) {
+                    // This is the "Next Day" segment (linear time > 1440)
+                    // Night here corresponds to 00:00 - nEnd of the next day.
+                    // On linear scale: [1440, 1440 + nEnd]
+                    rawNightMins = getOverlap(seg.start, seg.end, 1440, 1440 + nEnd);
                 } else {
-                    segNight += getOverlap(seg.start, seg.end, nStart, nEnd);
+                    // This is the "Anchor Day" segment
+                    // Night here corresponds to nStart - 24:00 of the anchor day.
+                    // On linear scale: [nStart, 1440]
+                    // ALSO check if Night starts early (e.g. 00:00-06:00) on anchor day?
+                    // Standard assumption: Night definition is fixed hours.
+                    // If shift is 08:00-20:00. Night 22-06.
+                    // Anchor segment [480, 1200]. Overlap with [1320, 1440] is 0. Correct.
+                    // If shift is 20:00-08:00.
+                    // Anchor segment [1200, 1440]. Overlap with [1320, 1440] is 120 (2h). Correct.
+                    
+                    rawNightMins = getOverlap(seg.start, seg.end, nStart, 1440);
+                    
+                    // Also check if night wraps into morning of Anchor day (00:00 - nEnd)
+                    // Only if shift is entirely within 0 - nEnd? No, linear logic handles this.
+                    // If shift 05:00-10:00. sStart=300, sEnd=600.
+                    // seg [300, 600]. 
+                    // Overlap with [nStart(1320), 1440] is 0.
+                    // We missed the [0, nEnd(360)] part!
+                    
+                    // CORRECTION for Anchor Segment:
+                    // It can contain BOTH the tail of previous night [0, nEnd] AND head of current night [nStart, 1440]
+                    // IF sStart < nEnd (shift starts in early morning)
+                    if (seg.start < nEnd) {
+                         rawNightMins += getOverlap(seg.start, seg.end, 0, nEnd);
+                    }
                 }
-                const lunchNight = getOverlap(lStart, lEnd, nStart, 1440) + getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
-                segNight = Math.max(0, segNight - lunchNight);
-
+                
+                // 3. Subtract Lunch from Night
+                // We need to subtract the part of lunch that fell into night hours within this segment
+                const lunchInNight = getOverlap(lStart, lEnd, nStart, 1440) + getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
+                // Note: lunchInNight calculation above was global. Need to make it segment-local or just subtract lunch overlap.
+                // Simpler: RawNight includes Lunch. We want NetNight.
+                // NetNight = RawNight - (Lunch ∩ Night).
+                // We calculated segLunch (Lunch ∩ Segment).
+                // We need (Lunch ∩ Night ∩ Segment).
+                // Since lStart/lEnd are linear, and we know Night intervals, we can calc overlap directly.
+                
+                let segLunchInNight = 0;
+                // Check overlap of Lunch [lStart, lEnd] with Night intervals inside this segment
+                if (seg.start >= 1440) {
+                    // Next Day Segment
+                    segLunchInNight = getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
+                } else {
+                    // Anchor Segment
+                    segLunchInNight = getOverlap(lStart, lEnd, nStart, 1440);
+                    if (seg.start < nEnd) {
+                         segLunchInNight += getOverlap(lStart, lEnd, 0, nEnd);
+                    }
+                }
+                
+                const segNight = Math.max(0, rawNightMins - segLunchInNight);
                 const segDay = segDur - segNight;
 
+                // 4. Calculate Pay
                 const mult = seg.isHoliday ? 2 : 1;
                 const baseNightPay = (segNight / 60) * rate * mult * (1 + nightBonus);
                 const baseDayPay = (segDay / 60) * rate * mult;
@@ -162,9 +240,10 @@
         // --- Components ---
         
         const ShiftModal = ({ show, onClose, date, shiftData, paymentData, bonusData, isHoliday, onSave, onDelete, templates }) => {
+            // Default empty form: Times are EMPTY to allow saving just "Holiday"
             const getEmptyForm = () => ({
-                startTime: '08:00', endTime: '17:00',
-                lunchStart: '12:00', lunchEnd: '13:00',
+                startTime: '', endTime: '',
+                lunchStart: '', lunchEnd: '',
                 rate: 525,
                 nightStart: '22:00', nightEnd: '06:00',
                 nightBonusPercent: 40,
@@ -180,7 +259,7 @@
             useEffect(() => {
                 if (show) {
                     if (shiftData) setForm(shiftData);
-                    else setForm(getEmptyForm());
+                    else setForm(getEmptyForm()); // Empty form for new entries
                     setPayment(paymentData || 0);
                     setBonus(bonusData || 0);
                     setHoliday(isHoliday || false);
@@ -206,25 +285,26 @@
             };
 
             const holidaysMap = { [date]: holiday };
+            // Calculate stats. If no times, stats are zero.
             const stats = calculateShiftStats(form, holidaysMap, date);
-            const hasShift = !!shiftData; // Initial state check
+            const hasShift = !!shiftData;
             
             const bd = stats.breakdown;
 
             const handleSave = () => { 
-                // Save logic: 
-                // If start/end are default (empty logic not applicable here as they are always filled), 
-                // we check if user actually wanted to save a shift. 
-                // Let's assume if user filled rate/hours, they want a shift.
-                // But simple approach: Always save what's in form.
-                onSave(date, form, payment ? Number(payment) : null, bonus ? Number(bonus) : null, holiday); 
+                // Determine if we should save shift
+                // If startTime and endTime are present -> Save Shift
+                // If startTime or endTime are missing -> Delete Shift (save null)
+                const shiftPayload = (form.startTime && form.endTime) ? form : null;
+                
+                onSave(date, shiftPayload, payment ? Number(payment) : null, bonus ? Number(bonus) : null, holiday); 
                 onClose(); 
             };
             
             const handleDelete = () => {
                 if(confirm("Удалить смену? День останется праздничным, если отмечено.")) {
                     onDelete(date);
-                    // Don't close modal? Or close? Usually close.
+                    // Don't close, let user see the change or close manually? Close is better.
                     onClose();
                 }
             };
@@ -278,32 +358,32 @@
                             <div className="bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl">
                                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Время</span>
                                 <div className="grid grid-cols-2 gap-2">
-                                    <div><label className="text-xs text-gray-500">Начало</label><input type="time" value=${form.startTime} onChange=${(e) => update('startTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
-                                    <div><label className="text-xs text-gray-500">Конец</label><input type="time" value=${form.endTime} onChange=${(e) => update('endTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
+                                    <div><label className="text-xs text-gray-500">Начало</label><input type="time" value=${form.startTime} onChange=${(e) => update('startTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none input-time"/></div>
+                                    <div><label className="text-xs text-gray-500">Конец</label><input type="time" value=${form.endTime} onChange=${(e) => update('endTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none input-time"/></div>
                                 </div>
                             </div>
                             
                             <!-- Lunch & Rate -->
-                            <div className="grid grid-cols-3 gap-2">
-                                <div className="col-span-1 bg-gray-50 dark:bg-gray-700/50 p-2 rounded-xl">
-                                    <label className="text-xs text-gray-500">Обед</label>
-                                    <div className="flex gap-1 mt-1">
-                                        <input type="time" value=${form.lunchStart} onChange=${(e) => update('lunchStart', e.target.value)} className="w-full p-1.5 text-xs bg-white dark:bg-gray-800 rounded border dark:border-gray-600 outline-none"/>
-                                        <input type="time" value=${form.lunchEnd} onChange=${(e) => update('lunchEnd', e.target.value)} className="w-full p-1.5 text-xs bg-white dark:bg-gray-800 rounded border dark:border-gray-600 outline-none"/>
+                            <div className="grid grid-cols-2 gap-2">
+                                <div className="bg-gray-50 dark:bg-gray-700/50 p-2 rounded-xl">
+                                    <label className="text-xs text-gray-500 block mb-1">Обед (нач-кон)</label>
+                                    <div className="grid grid-cols-2 gap-1">
+                                        <input type="time" value=${form.lunchStart} onChange=${(e) => update('lunchStart', e.target.value)} className="w-full p-1.5 text-xs bg-white dark:bg-gray-800 rounded border dark:border-gray-600 outline-none input-time"/>
+                                        <input type="time" value=${form.lunchEnd} onChange=${(e) => update('lunchEnd', e.target.value)} className="w-full p-1.5 text-xs bg-white dark:bg-gray-800 rounded border dark:border-gray-600 outline-none input-time"/>
                                     </div>
                                 </div>
-                                <div className="col-span-2 bg-gray-50 dark:bg-gray-700/50 p-2 rounded-xl">
-                                    <label className="text-xs text-gray-500">Ставка (₽/ч)</label>
-                                    <input type="number" value=${form.rate} onChange=${(e) => update('rate', e.target.value)} className="w-full p-2 mt-1 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none font-bold"/>
+                                <div className="bg-gray-50 dark:bg-gray-700/50 p-2 rounded-xl">
+                                    <label className="text-xs text-gray-500 block mb-1">Ставка (₽/ч)</label>
+                                    <input type="number" value=${form.rate} onChange=${(e) => update('rate', e.target.value)} className="w-full p-2 mt-1 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none font-bold text-sm"/>
                                 </div>
                             </div>
                             
-                            <!-- Night -->
+                            <!-- Night (Collapsible) -->
                             <details className="bg-indigo-50 dark:bg-indigo-900/20 p-3 rounded-xl border border-indigo-100 dark:border-indigo-800">
                                 <summary className="text-sm font-medium text-indigo-700 dark:text-indigo-300 cursor-pointer">Ночные настройки</summary>
                                 <div className="grid grid-cols-3 gap-2 items-end mt-2">
-                                    <div><label className="text-xs text-gray-500">С</label><input type="time" value=${form.nightStart} onChange=${(e) => update('nightStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
-                                    <div><label className="text-xs text-gray-500">До</label><input type="time" value=${form.nightEnd} onChange=${(e) => update('nightEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
+                                    <div><label className="text-xs text-gray-500">С</label><input type="time" value=${form.nightStart} onChange=${(e) => update('nightStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none input-time"/></div>
+                                    <div><label className="text-xs text-gray-500">До</label><input type="time" value=${form.nightEnd} onChange=${(e) => update('nightEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none input-time"/></div>
                                     <div><label className="text-xs text-gray-500">Доплата %</label><input type="number" value=${form.nightBonusPercent} onChange=${(e) => update('nightBonusPercent', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
                                 </div>
                             </details>
@@ -313,14 +393,14 @@
                                 <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-xl border border-yellow-200 dark:border-yellow-800">
                                     <label className="text-xs font-medium text-yellow-700 dark:text-yellow-300">Премия</label>
                                     <div className="flex items-center gap-1 mt-1">
-                                        <input type="number" placeholder="0" value=${bonus} onChange=${(e) => setBonus(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-yellow-600 text-sm"/>
+                                        <input type="number" placeholder="0" value=${bonus} onChange=${(e) => setBonus(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-yellow-600 text-sm min-w-0"/>
                                         <span className="text-yellow-600 font-bold text-sm">₽</span>
                                     </div>
                                 </div>
                                 <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-xl border border-green-200 dark:border-green-800">
                                     <label className="text-xs font-medium text-green-700 dark:text-green-300">Аванс</label>
                                     <div className="flex items-center gap-1 mt-1">
-                                        <input type="number" placeholder="0" value=${payment} onChange=${(e) => setPayment(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-green-600 text-sm"/>
+                                        <input type="number" placeholder="0" value=${payment} onChange=${(e) => setPayment(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-green-600 text-sm min-w-0"/>
                                         <span className="text-green-600 font-bold text-sm">₽</span>
                                     </div>
                                 </div>
@@ -352,9 +432,9 @@
 
         const SettingsScreen = ({ settings, setSettings, onClose }) => {
             const [editingId, setEditingId] = useState(null);
-            const [form, setForm] = useState({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' });
+            const [form, setForm] = useState({ name: '', startTime: '08:00', endTime: '20:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' });
 
-            const resetForm = () => { setForm({ name: '', startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' }); setEditingId(null); };
+            const resetForm = () => { setForm({ name: '', startTime: '08:00', endTime: '20:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' }); setEditingId(null); };
             
             const handleEdit = (tpl) => { setForm(tpl); setEditingId(tpl.id); };
 
@@ -477,7 +557,7 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            const KEYS = { CFG: 'v28_cfg', DATA: 'v28_data' };
+            const KEYS = { CFG: 'v29_cfg', DATA: 'v29_data' };
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
@@ -592,15 +672,14 @@
                 setSettings(p => {
                     const ns = {...p.shifts}, np = {...p.payments}, nb = {...p.bonuses}, nh = {...p.holidays};
                     
-                    // Handle Shift
-                    if (sData) ns[d] = sData;
-                    else delete ns[d]; // Delete shift if null explicitly passed
+                    // Shift logic: if sData is provided (has times), save it. Else delete.
+                    if (sData && sData.startTime && sData.endTime) ns[d] = sData;
+                    else delete ns[d];
                     
-                    // Handle Money
                     if (pAmount) np[d] = pAmount; else delete np[d];
                     if (bAmount) nb[d] = bAmount; else delete nb[d];
                     
-                    // Handle Holiday
+                    // Holiday logic: independent
                     if (isHol) nh[d] = true; else delete nh[d];
 
                     return {...p, shifts: ns, payments: np, bonuses: nb, holidays: nh};
