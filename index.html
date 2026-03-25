@@ -91,7 +91,6 @@
             const rate = Number(shift.rate) || 0;
             const nightBonus = (Number(shift.nightBonusPercent) || 0) / 100;
 
-            // Determine dates
             const anchorDate = new Date(shiftDateStr);
             const nextDate = new Date(shiftDateStr);
             nextDate.setDate(nextDate.getDate() + 1);
@@ -100,7 +99,6 @@
             const isAnchorHoliday = holidaysMap[shiftDateStr] || false;
             const isNextHoliday = holidaysMap[nextDateStr] || false;
 
-            // Segments to process
             const segments = [];
             if (sEnd > 1440) {
                 segments.push({ start: sStart, end: 1440, isHoliday: isAnchorHoliday });
@@ -112,41 +110,32 @@
             let totalMins = 0;
             let totalPay = 0;
             
-            // Detailed Stats
             let dayMins = 0; let nightMins = 0; let holidayMins = 0;
             let dayPay = 0; let nightPay = 0; let holidayPay = 0;
 
             segments.forEach(seg => {
-                // 1. Calculate work minutes in this segment
                 const segDur = (seg.end - seg.start) - getOverlap(seg.start, seg.end, lStart, lEnd);
                 if (segDur <= 0) return;
                 totalMins += segDur;
 
-                // 2. Calculate Night Minutes in this segment
                 let segNight = 0;
-                // Night logic: if Night wraps midnight (e.g. 22-06), it covers [nStart, 1440] and [0, nEnd] (linear: [1440, 1440+nEnd])
                 if (nStart > nEnd) {
-                    segNight += getOverlap(seg.start, seg.end, nStart, 1440); // Anchor night
-                    segNight += getOverlap(seg.start, seg.end, 1440, 1440 + nEnd); // Next day night
+                    segNight += getOverlap(seg.start, seg.end, nStart, 1440);
+                    segNight += getOverlap(seg.start, seg.end, 1440, 1440 + nEnd);
                 } else {
                     segNight += getOverlap(seg.start, seg.end, nStart, nEnd);
                 }
-                // Subtract lunch from night
                 const lunchNight = getOverlap(lStart, lEnd, nStart, 1440) + getOverlap(lStart, lEnd, 1440, 1440 + nEnd);
                 segNight = Math.max(0, segNight - lunchNight);
 
                 const segDay = segDur - segNight;
 
-                // 3. Calculate Pay
                 const mult = seg.isHoliday ? 2 : 1;
-                
-                // Pay logic
                 const baseNightPay = (segNight / 60) * rate * mult * (1 + nightBonus);
                 const baseDayPay = (segDay / 60) * rate * mult;
 
                 totalPay += baseDayPay + baseNightPay;
 
-                // Stats accumulation
                 if (seg.isHoliday) {
                     holidayMins += segDur;
                     holidayPay += baseDayPay + baseNightPay;
@@ -218,20 +207,27 @@
 
             const holidaysMap = { [date]: holiday };
             const stats = calculateShiftStats(form, holidaysMap, date);
+            const hasShift = !!shiftData; // Initial state check
+            
+            const bd = stats.breakdown;
 
-            const save = () => { 
+            const handleSave = () => { 
+                // Save logic: 
+                // If start/end are default (empty logic not applicable here as they are always filled), 
+                // we check if user actually wanted to save a shift. 
+                // Let's assume if user filled rate/hours, they want a shift.
+                // But simple approach: Always save what's in form.
                 onSave(date, form, payment ? Number(payment) : null, bonus ? Number(bonus) : null, holiday); 
                 onClose(); 
             };
             
             const handleDelete = () => {
-                if(confirm("Удалить смену за этот день?")) {
+                if(confirm("Удалить смену? День останется праздничным, если отмечено.")) {
                     onDelete(date);
+                    // Don't close modal? Or close? Usually close.
                     onClose();
                 }
             };
-            
-            const bd = stats.breakdown;
 
             return html`
                 <div className="fixed inset-0 bg-black/50 flex items-end justify-center z-50" onClick=${onClose}>
@@ -242,17 +238,33 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth=${2} d="M6 18L18 6M6 6l12 12" /></svg>
                             </button>
                         </div>
+                        
                         <div className="space-y-4">
                             
-                            <!-- Holiday Toggle -->
-                            <label className="flex items-center justify-between p-3 bg-red-50 dark:bg-red-900/20 rounded-xl cursor-pointer border border-red-200 dark:border-red-700">
-                                <div className="flex flex-col">
-                                    <span className="font-medium text-red-700 dark:text-red-300">Праздничный день</span>
-                                    <span className="text-[10px] text-red-400">Оплата часов этого дня: x2</span>
+                            <!-- TOP SECTION: STATS -->
+                            <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-xl border border-green-200 dark:border-green-700">
+                                <div className="flex justify-between items-center mb-2">
+                                    <div>
+                                        <div className="text-sm text-green-700 dark:text-green-300 font-medium">
+                                            ${stats.totalHours > 0 ? (form.note || 'Смена') : 'Выходной'}
+                                        </div>
+                                        ${bonus > 0 && html`<div class="text-xs text-yellow-600 dark:text-yellow-400">+ Премия: ${Number(bonus).toLocaleString()}₽</div>`}
+                                    </div>
+                                    <div className="text-3xl font-bold text-green-600 dark:text-green-400">${stats.totalPay.toLocaleString()} ₽</div>
                                 </div>
-                                <input type="checkbox" checked=${holiday} onChange=${(e) => setHoliday(e.target.checked)} className="w-5 h-5 rounded text-red-600"/>
-                            </label>
+                                
+                                ${stats.totalHours > 0 && html`
+                                    <div className="bg-gray-100 dark:bg-gray-700/30 p-2 rounded-lg text-xs space-y-1 mt-2">
+                                        <div class="flex justify-between"><span>Рабочее время:</span><span>${stats.totalHours} ч</span></div>
+                                        ${bd.dayMins > 0 && html`<div class="flex justify-between text-gray-500"><span>Дневные:</span><span>${(bd.dayMins/60).toFixed(1)} ч (${bd.dayPay}₽)</span></div>`}
+                                        ${bd.nightMins > 0 && html`<div class="flex justify-between text-indigo-500"><span>Ночные:</span><span>${(bd.nightMins/60).toFixed(1)} ч (${bd.nightPay}₽)</span></div>`}
+                                        ${bd.holidayMins > 0 && html`<div class="flex justify-between text-red-500 font-medium"><span>Праздничные (x2):</span><span>${(bd.holidayMins/60).toFixed(1)} ч (${bd.holidayPay}₽)</span></div>`}
+                                    </div>
+                                `}
+                            </div>
 
+                            <!-- MIDDLE SECTION: SHIFT FORM -->
+                            
                             <!-- Templates -->
                             <div className="flex flex-wrap gap-2">
                                 ${templates.map(tpl => html`
@@ -264,81 +276,71 @@
 
                             <!-- Time -->
                             <div className="bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl">
-                                <div className="flex justify-between text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                    <span>Смена</span>
-                                    <span className="text-xs text-gray-400">Итого: ${stats.totalHours} ч</span>
-                                </div>
+                                <span className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Время</span>
                                 <div className="grid grid-cols-2 gap-2">
                                     <div><label className="text-xs text-gray-500">Начало</label><input type="time" value=${form.startTime} onChange=${(e) => update('startTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
                                     <div><label className="text-xs text-gray-500">Конец</label><input type="time" value=${form.endTime} onChange=${(e) => update('endTime', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
                                 </div>
                             </div>
-                            <!-- Lunch -->
-                            <div className="bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl">
-                                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Обед</span>
-                                <div className="grid grid-cols-2 gap-2 mt-2">
-                                    <input type="time" value=${form.lunchStart} onChange=${(e) => update('lunchStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
-                                    <input type="time" value=${form.lunchEnd} onChange=${(e) => update('lunchEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/>
+                            
+                            <!-- Lunch & Rate -->
+                            <div className="grid grid-cols-3 gap-2">
+                                <div className="col-span-1 bg-gray-50 dark:bg-gray-700/50 p-2 rounded-xl">
+                                    <label className="text-xs text-gray-500">Обед</label>
+                                    <div className="flex gap-1 mt-1">
+                                        <input type="time" value=${form.lunchStart} onChange=${(e) => update('lunchStart', e.target.value)} className="w-full p-1.5 text-xs bg-white dark:bg-gray-800 rounded border dark:border-gray-600 outline-none"/>
+                                        <input type="time" value=${form.lunchEnd} onChange=${(e) => update('lunchEnd', e.target.value)} className="w-full p-1.5 text-xs bg-white dark:bg-gray-800 rounded border dark:border-gray-600 outline-none"/>
+                                    </div>
                                 </div>
-                            </div>
-                            <!-- Rate -->
-                            <div className="flex gap-2">
-                                <div className="flex-1 bg-gray-50 dark:bg-gray-700/50 p-3 rounded-xl">
+                                <div className="col-span-2 bg-gray-50 dark:bg-gray-700/50 p-2 rounded-xl">
                                     <label className="text-xs text-gray-500">Ставка (₽/ч)</label>
-                                    <input type="number" value=${form.rate} onChange=${(e) => update('rate', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none font-bold"/>
+                                    <input type="number" value=${form.rate} onChange=${(e) => update('rate', e.target.value)} className="w-full p-2 mt-1 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none font-bold"/>
                                 </div>
                             </div>
                             
                             <!-- Night -->
-                            <div className="bg-indigo-50 dark:bg-indigo-900/20 p-3 rounded-xl border border-indigo-100 dark:border-indigo-800">
-                                <div className="flex justify-between items-center mb-2">
-                                    <span className="text-sm font-medium text-indigo-700 dark:text-indigo-300">Ночные</span>
-                                    <span className="text-xs text-indigo-500">Ночь: ${(bd.nightMins/60).toFixed(1)} ч</span>
-                                </div>
-                                <div className="grid grid-cols-3 gap-2 items-end">
+                            <details className="bg-indigo-50 dark:bg-indigo-900/20 p-3 rounded-xl border border-indigo-100 dark:border-indigo-800">
+                                <summary className="text-sm font-medium text-indigo-700 dark:text-indigo-300 cursor-pointer">Ночные настройки</summary>
+                                <div className="grid grid-cols-3 gap-2 items-end mt-2">
                                     <div><label className="text-xs text-gray-500">С</label><input type="time" value=${form.nightStart} onChange=${(e) => update('nightStart', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
                                     <div><label className="text-xs text-gray-500">До</label><input type="time" value=${form.nightEnd} onChange=${(e) => update('nightEnd', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
                                     <div><label className="text-xs text-gray-500">Доплата %</label><input type="number" value=${form.nightBonusPercent} onChange=${(e) => update('nightBonusPercent', e.target.value)} className="w-full p-2 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-600 outline-none"/></div>
                                 </div>
-                            </div>
+                            </details>
 
                             <!-- FINANCES -->
-                            <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-xl border border-yellow-200 dark:border-yellow-800">
-                                <label className="text-xs font-medium text-yellow-700 dark:text-yellow-300">Премия</label>
-                                <div className="flex items-center gap-2 mt-1">
-                                    <input type="number" placeholder="0" value=${bonus} onChange=${(e) => setBonus(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-yellow-600"/>
-                                    <span className="text-yellow-600 font-bold">₽</span>
+                            <div className="grid grid-cols-2 gap-2">
+                                <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-xl border border-yellow-200 dark:border-yellow-800">
+                                    <label className="text-xs font-medium text-yellow-700 dark:text-yellow-300">Премия</label>
+                                    <div className="flex items-center gap-1 mt-1">
+                                        <input type="number" placeholder="0" value=${bonus} onChange=${(e) => setBonus(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-yellow-600 text-sm"/>
+                                        <span className="text-yellow-600 font-bold text-sm">₽</span>
+                                    </div>
+                                </div>
+                                <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-xl border border-green-200 dark:border-green-800">
+                                    <label className="text-xs font-medium text-green-700 dark:text-green-300">Аванс</label>
+                                    <div className="flex items-center gap-1 mt-1">
+                                        <input type="number" placeholder="0" value=${payment} onChange=${(e) => setPayment(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-green-600 text-sm"/>
+                                        <span className="text-green-600 font-bold text-sm">₽</span>
+                                    </div>
                                 </div>
                             </div>
 
-                            <div className="bg-green-50 dark:bg-green-900/20 p-3 rounded-xl border border-green-200 dark:border-green-800">
-                                <label className="text-xs font-medium text-green-700 dark:text-green-300">Аванс</label>
-                                <div className="flex items-center gap-2 mt-1">
-                                    <input type="number" placeholder="0" value=${payment} onChange=${(e) => setPayment(e.target.value)} className="flex-1 p-2 rounded-lg bg-white dark:bg-gray-800 border dark:border-gray-600 outline-none font-bold text-green-600"/>
-                                    <span className="text-green-600 font-bold">₽</span>
-                                </div>
-                            </div>
-
-                            <!-- DETAILED CALCULATION BLOCK -->
-                            <div className="bg-gray-100 dark:bg-gray-700/30 p-4 rounded-xl text-xs space-y-1 border dark:border-gray-600">
-                                <div className="flex justify-between font-bold text-gray-700 dark:text-gray-200 border-b dark:border-gray-600 pb-1 mb-1">
-                                    <span>Расчет смены:</span>
-                                    <span>${stats.totalHours} ч</span>
-                                </div>
-                                ${bd.dayMins > 0 && html`<div class="flex justify-between text-gray-600 dark:text-gray-400"><span>Дневные (${(bd.dayMins/60).toFixed(1)}ч)</span><span>${bd.dayPay.toLocaleString()} ₽</span></div>`}
-                                ${bd.nightMins > 0 && html`<div class="flex justify-between text-indigo-600 dark:text-indigo-400"><span>Ночные (${(bd.nightMins/60).toFixed(1)}ч)</span><span>${bd.nightPay.toLocaleString()} ₽</span></div>`}
-                                ${bd.holidayMins > 0 && html`<div class="flex justify-between text-red-600 dark:text-red-400 font-medium"><span>Праздничные (${(bd.holidayMins/60).toFixed(1)}ч x2)</span><span>${bd.holidayPay.toLocaleString()} ₽</span></div>`}
-                            </div>
-
-                            <!-- Total -->
-                            <div className="bg-green-50 dark:bg-green-900/20 p-4 rounded-xl text-center border border-green-200 dark:border-green-800">
-                                <div className="text-3xl font-bold text-green-600 dark:text-green-400">${stats.totalPay.toLocaleString()} ₽</div>
-                            </div>
+                            <!-- BOTTOM SECTION: HOLIDAY & ACTIONS -->
                             
-                            <button onClick=${save} className="w-full p-3 rounded-xl text-white font-bold text-lg bg-blue-500 hover:bg-blue-600 transition">Сохранить</button>
+                            <!-- Holiday Toggle -->
+                            <label className="flex items-center justify-between p-3 bg-red-50 dark:bg-red-900/20 rounded-xl cursor-pointer border border-red-200 dark:border-red-700 mt-2">
+                                <div className="flex flex-col">
+                                    <span className="font-medium text-red-700 dark:text-red-300">Праздничный день</span>
+                                    <span className="text-[10px] text-red-400">Часы этого дня x2</span>
+                                </div>
+                                <input type="checkbox" checked=${holiday} onChange=${(e) => setHoliday(e.target.checked)} className="w-5 h-5 rounded text-red-600"/>
+                            </label>
                             
-                            ${shiftData && html`
-                                <button onClick=${handleDelete} className="w-full p-3 rounded-xl font-bold text-red-500 border-2 border-red-200 dark:border-red-800 hover:bg-red-50 dark:hover:bg-red-900/20 transition mt-2">
+                            <button onClick=${handleSave} className="w-full p-3 rounded-xl text-white font-bold text-lg bg-blue-500 hover:bg-blue-600 transition">Сохранить</button>
+                            
+                            ${hasShift && html`
+                                <button onClick=${handleDelete} className="w-full p-2 rounded-xl font-medium text-red-500 text-sm hover:bg-red-50 dark:hover:bg-red-900/20 transition">
                                     Удалить смену
                                 </button>
                             `}
@@ -415,14 +417,14 @@
                                     <div className="flex-1"><label className="text-xs text-gray-400">Цвет</label><input type="color" value=${form.color} onChange=${(e) => setForm(p => ({...p, color: e.target.value}))} className="w-full h-10 rounded-lg cursor-pointer bg-transparent"/></div>
                                 </div>
 
-                                <div class="bg-indigo-50 dark:bg-indigo-900/20 p-2 rounded-lg text-xs space-y-2">
-                                    <div class="font-medium text-indigo-600">Ночные настройки</div>
+                                <details class="bg-indigo-50 dark:bg-indigo-900/20 p-2 rounded-lg text-xs space-y-2">
+                                    <summary class="font-medium text-indigo-600 cursor-pointer">Ночные настройки</summary>
                                     <div className="grid grid-cols-3 gap-2">
                                         <input type="time" value=${form.nightStart} onChange=${(e) => setForm(p => ({...p, nightStart: e.target.value}))} className="w-full p-1 bg-white dark:bg-gray-800 rounded border dark:border-gray-700"/>
                                         <input type="time" value=${form.nightEnd} onChange=${(e) => setForm(p => ({...p, nightEnd: e.target.value}))} className="w-full p-1 bg-white dark:bg-gray-800 rounded border dark:border-gray-700"/>
                                         <input type="number" placeholder="%" value=${form.nightBonusPercent} onChange=${(e) => setForm(p => ({...p, nightBonusPercent: e.target.value}))} className="w-full p-1 bg-white dark:bg-gray-800 rounded border dark:border-gray-700"/>
                                     </div>
-                                </div>
+                                </details>
 
                                 <button onClick=${handleSave} className="w-full mt-2 p-2 rounded-lg text-white font-medium ${editingId ? 'bg-yellow-500' : 'bg-green-500'}">${editingId ? 'Сохранить' : 'Добавить'}</button>
                                 ${editingId && html`<button onClick=${resetForm} className="w-full mt-1 p-2 text-gray-500 text-sm">Отмена</button>`}
@@ -460,8 +462,8 @@
                 bonuses: {},
                 holidays: {},
                 templates: [
-                    { id: 1, name: "День", startTime: '08:00', endTime: '17:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' },
-                    { id: 2, name: "Ночь", startTime: '22:00', endTime: '06:00', lunchStart: '00:00', lunchEnd: '01:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#8b5cf6' }
+                    { id: 1, name: "День", startTime: '08:00', endTime: '20:00', lunchStart: '12:00', lunchEnd: '13:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#3b82f6' },
+                    { id: 2, name: "Ночь", startTime: '20:00', endTime: '08:00', lunchStart: '00:00', lunchEnd: '01:00', rate: 525, nightStart: '22:00', nightEnd: '06:00', nightBonusPercent: 40, color: '#8b5cf6' }
                 ],
                 startDay: 1, theme: 'light', tax: 13
             });
@@ -475,7 +477,7 @@
             const [isSelectMode, setIsSelectMode] = useState(false);
             const [selectedDates, setSelectedDates] = useState(new Set());
 
-            const KEYS = { CFG: 'v27_cfg', DATA: 'v27_data' };
+            const KEYS = { CFG: 'v28_cfg', DATA: 'v28_data' };
             const tg = window.Telegram?.WebApp;
             
             const load = () => {
@@ -563,7 +565,6 @@
                             c++;
                             if(x.iso < td) ps++;
                             
-                            // Detailed Aggregation
                             const bd = s.breakdown;
                             nightH += bd.nightMins / 60;
                             nightPay += bd.nightPay;
@@ -588,13 +589,22 @@
             }, [days, settings.shifts, settings.payments, settings.bonuses, settings.holidays, settings.tax]);
 
             const saveShift = (d, sData, pAmount, bAmount, isHol) => {
-                setSettings(p => ({
-                    ...p, 
-                    shifts: {...p.shifts, [d]: sData},
-                    payments: {...p.payments, [d]: pAmount},
-                    bonuses: {...p.bonuses, [d]: bAmount},
-                    holidays: {...p.holidays, [d]: isHol}
-                }));
+                setSettings(p => {
+                    const ns = {...p.shifts}, np = {...p.payments}, nb = {...p.bonuses}, nh = {...p.holidays};
+                    
+                    // Handle Shift
+                    if (sData) ns[d] = sData;
+                    else delete ns[d]; // Delete shift if null explicitly passed
+                    
+                    // Handle Money
+                    if (pAmount) np[d] = pAmount; else delete np[d];
+                    if (bAmount) nb[d] = bAmount; else delete nb[d];
+                    
+                    // Handle Holiday
+                    if (isHol) nh[d] = true; else delete nh[d];
+
+                    return {...p, shifts: ns, payments: np, bonuses: nb, holidays: nh};
+                });
             };
 
             const deleteShift = (d) => {
